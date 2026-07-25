@@ -15,7 +15,10 @@
                (:file "crypto")
                (:file "discovery")
                (:file "srp")
-               (:file "pairing"))  ; more added per milestone
+               (:file "pairing")
+               (:file "store")
+               (:file "http")
+               (:file "transport"))
   :in-order-to ((test-op (test-op "hap/test"))))
 
 (defsystem "hap/test"
@@ -28,6 +31,7 @@
                (:file "crypto-tests")
                (:file "discovery-tests")
                (:file "srp-tests")
-               (:file "pairing-tests"))
+               (:file "pairing-tests")
+               (:file "transport-tests"))
   :perform (test-op (o c)
              (uiop:symbol-call :hap/test '#:run-tests)))

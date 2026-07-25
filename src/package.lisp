@@ -19,4 +19,8 @@
    #:accessory-txt #:advertise-accessory #:update-accessory-advertisement
    #:stop-advertising #:accessory-paired #:accessory-paired-controllers
    ;; pairing (controller role)
-   #:controller #:make-hap-controller #:controller-pairing-id #:controller-public))
+   #:controller #:make-hap-controller #:controller-pairing-id #:controller-public
+   ;; persistence + transport
+   #:save-accessory #:load-accessory
+   #:serve-accessory #:stop-accessory #:hap-server #:hap-server-port
+   #:pair-with-accessory))
