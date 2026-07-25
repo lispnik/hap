@@ -1,0 +1,4 @@
+# ocicl vendors deps here; ocicl.csv is the lockfile
+/ocicl/
+*.fasl
+*.abcl
