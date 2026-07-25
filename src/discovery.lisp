@@ -52,6 +52,7 @@
   (port 51826)                    ; HAP TCP port
   (paired nil)
   seed public                      ; Ed25519 long-term identity (raw octets)
+  (paired-controllers (make-hash-table :test 'equal))  ; pairingID -> controller LTPK
   responder service-info)          ; live 0conf state
 
 (defun make-hap-accessory (&rest args)

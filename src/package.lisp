@@ -17,4 +17,6 @@
    #:accessory-config-number #:accessory-state-number
    #:accessory-setup-code #:accessory-setup-id #:accessory-port #:accessory-paired
    #:accessory-txt #:advertise-accessory #:update-accessory-advertisement
-   #:stop-advertising))
+   #:stop-advertising #:accessory-paired #:accessory-paired-controllers
+   ;; pairing (controller role)
+   #:controller #:make-hap-controller #:controller-pairing-id #:controller-public))
