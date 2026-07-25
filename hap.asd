@@ -13,7 +13,8 @@
   :components ((:file "package")
                (:file "tlv8")
                (:file "crypto")
-               (:file "discovery"))     ; more added per milestone
+               (:file "discovery")
+               (:file "srp"))       ; more added per milestone
   :in-order-to ((test-op (test-op "hap/test"))))
 
 (defsystem "hap/test"
@@ -24,6 +25,7 @@
   :components ((:file "package")
                (:file "tlv8-tests")
                (:file "crypto-tests")
-               (:file "discovery-tests"))
+               (:file "discovery-tests")
+               (:file "srp-tests"))
   :perform (test-op (o c)
              (uiop:symbol-call :hap/test '#:run-tests)))
