@@ -39,7 +39,8 @@ SECURE-STREAM, over which the /accessories and /characteristics traffic flows."
   (let ((raw (socket-stream conn))
         (pair-session (make-pair-session :accessory acc))
         (verify (make-verify-session :accessory acc))
-        (secure nil))
+        (secure nil)
+        (connection nil))                  ; a HAP-CONNECTION once the session is up
     (unwind-protect
          (loop
            (multiple-value-bind (method path body)
@@ -52,12 +53,18 @@ SECURE-STREAM, over which the /accessories and /characteristics traffic flows."
                ((eql 0 (search "/pair-verify" path))
                 (write-http-response raw (dispatch-pair-verify verify body))
                 (when (and (verify-session-session verify) (not secure))
-                  (setf secure (make-secure-stream raw (verify-session-session verify)))))
-               ;; the accessory model — only over the encrypted session
+                  (setf secure (make-secure-stream raw (verify-session-session verify))
+                        connection (make-hap-connection :stream secure))))
+               ;; the accessory model — only over the encrypted session.  The
+               ;; reply goes out under the connection lock so a concurrent
+               ;; UPDATE-CHARACTERISTIC event push can't interleave with it.
                (secure
-                (write-reply secure (handle-accessory-request acc method path body)))
+                (let ((reply (handle-accessory-request acc method path body connection)))
+                  (bordeaux-threads:with-lock-held ((hap-connection-lock connection))
+                    (write-reply secure reply))))
                (t (write-reply raw (make-reply "470 Connection Authorization Required"
                                                nil nil))))))
+      (when connection (connection-unsubscribe-all connection))
       (ignore-errors (sb-bsd-sockets:socket-close conn)))))
 
 (defun accept-loop (server)
@@ -145,3 +152,47 @@ transparently ChaCha20-Poly1305-encrypted.  Caller closes the socket when done."
   "PUT JSON-OCTETS to PATH over STREAM.  Returns (values body-octets status-code)."
   (write-http-put stream path json-octets)
   (read-http-response stream))
+
+(defun hap-subscribe (stream aid iid)
+  "Subscribe to EVENT notifications for characteristic AID.IID (PUT ev:true)."
+  (hap-put stream "/characteristics"
+           (s->octets (format nil "{\"characteristics\":[{\"aid\":~D,\"iid\":~D,\"ev\":true}]}"
+                              aid iid))))
+
+(defun read-hap-event (stream)
+  "Read one pushed EVENT/1.0 (or response) message from STREAM.  Returns its parsed
+characteristics as a vector of hash-tables (jzon), or NIL at EOF."
+  (multiple-value-bind (body code) (read-http-response stream)
+    (declare (ignore code))
+    (when (and body (plusp (length body)))
+      (gethash "characteristics" (com.inuoe.jzon:parse (octets->string body))))))
+
+;;; --- controller discovery (M6): find accessories via 0conf -----------------
+
+(defun txt->string (v)
+  "TXT values arrive as strings (local) or octet vectors (off the wire)."
+  (cond ((null v) nil)
+        ((stringp v) v)
+        (t (octets->string (coerce v '(simple-array (unsigned-byte 8) (*)))))))
+
+(defun accessory-advertisement-info (service-info)
+  "Parse the HAP TXT keys of a discovered 0conf:SERVICE-INFO into a plist
+(:name :host :port :id :model :category :paired :config-number :protocol-version)."
+  (flet ((txt (k) (txt->string (cdr (assoc k (0conf:service-info-txt service-info)
+                                           :test #'string=)))))
+    (list :name (0conf:service-info-name service-info)
+          :host (0conf:service-info-host service-info)
+          :port (0conf:service-info-port service-info)
+          :id (txt "id")
+          :model (txt "md")
+          :category (let ((c (txt "ci"))) (and c (ignore-errors (parse-integer c))))
+          :paired (let ((sf (txt "sf"))) (and sf (string= sf "0"))) ; sf bit0=0 -> paired
+          :config-number (let ((c (txt "c#"))) (and c (ignore-errors (parse-integer c))))
+          :protocol-version (txt "pv"))))
+
+(defun discover-accessories (&key (timeout 3.0) interface)
+  "Browse the LAN for `_hap._tcp` accessories via 0conf; return a list of plists
+(see ACCESSORY-ADVERTISEMENT-INFO).  Needs working multicast — blocked for
+unentitled SBCL on macOS here, so this runs live on entitled/Linux hosts."
+  (mapcar #'accessory-advertisement-info
+          (0conf:browse-once "_hap._tcp.local" :timeout timeout :interface interface)))

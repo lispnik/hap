@@ -25,10 +25,15 @@
    #:hap-char #:make-hap-char #:hap-char-iid #:hap-char-type #:hap-char-value
    #:hap-char-perms #:hap-char-format #:hap-char-on-write
    #:accessory-information-service #:ensure-accessory-information #:add-lightbulb
-   #:find-characteristic
+   #:find-characteristic #:update-characteristic
+   ;; events (server push)
+   #:hap-connection #:subscribe-characteristic #:unsubscribe-characteristic
    ;; pairing (controller role)
    #:controller #:make-hap-controller #:controller-pairing-id #:controller-public
    ;; persistence + transport
    #:save-accessory #:load-accessory
    #:serve-accessory #:stop-accessory #:hap-server #:hap-server-port
-   #:pair-with-accessory #:verify-with-accessory #:hap-get #:hap-put))
+   #:pair-with-accessory #:verify-with-accessory #:hap-get #:hap-put
+   #:hap-subscribe #:read-hap-event
+   ;; controller discovery (M6)
+   #:discover-accessories #:accessory-advertisement-info))

@@ -18,9 +18,9 @@
                (:file "srp")
                (:file "pairing")
                (:file "secure")
-               (:file "model")
                (:file "store")
                (:file "http")
+               (:file "model")
                (:file "transport"))
   :in-order-to ((test-op (test-op "hap/test"))))
 

@@ -16,7 +16,8 @@
   (value nil)               ; current value (bool t/nil, string, or number)
   (perms '("pr"))           ; permissions: "pr" read, "pw" write, "ev" events
   (format "bool")           ; HAP format: bool / string / int / uint8 / float …
-  (on-write nil))           ; optional (lambda (value) …) called on a PUT
+  (on-write nil)            ; optional (lambda (value) …) called on a PUT
+  (subscribers '()))        ; HAP-CONNECTIONs subscribed to EVENT notifications
 
 (defstruct hap-service
   iid                       ; instance id
@@ -145,8 +146,11 @@ Returns a list of (aid . iid)."
                  (com.inuoe.jzon:stringify
                   (%obj "characteristics" (coerce results 'vector)))))))
 
-(defun handle-put-characteristics (acc body)
-  "PUT /characteristics — apply each {aid,iid,value}.  204 on full success."
+(defun char-notifies-p (c) (member "ev" (hap-char-perms c) :test #'string=))
+
+(defun handle-put-characteristics (acc body &optional connection)
+  "PUT /characteristics — apply each {aid,iid,value} write and each {aid,iid,ev}
+event subscription/unsubscription (needs CONNECTION).  204 on full success."
   (let* ((req (com.inuoe.jzon:parse (octets->string body)))
          (chars (gethash "characteristics" req))
          (ok t))
@@ -154,6 +158,7 @@ Returns a list of (aid . iid)."
           for aid = (gethash "aid" entry)
           for iid = (gethash "iid" entry)
           for has-value = (nth-value 1 (gethash "value" entry))
+          for has-ev = (nth-value 1 (gethash "ev" entry))
           for c = (and (eql aid (accessory-aid acc)) (find-characteristic acc iid))
           do (cond
                ((and c (char-writable-p c) has-value)
@@ -161,13 +166,17 @@ Returns a list of (aid . iid)."
                   (setf (hap-char-value c) v)
                   (when (hap-char-on-write c)
                     (ignore-errors (funcall (hap-char-on-write c) v)))))
-               ((not has-value) nil)           ; ev-only subscribe: ignore, still ok
-               (t (setf ok nil))))
+               ((and has-value (not (and c (char-writable-p c)))) (setf ok nil)))
+             ;; an entry may also (or instead) toggle event notifications
+             (when (and has-ev connection c (char-notifies-p c))
+               (if (gethash "ev" entry)
+                   (subscribe-characteristic connection c)
+                   (unsubscribe-characteristic connection c))))
     (if ok
         (no-content)
         (json-reply (s->octets "{\"status\":-70404}") "207 Multi-Status"))))
 
-(defun handle-accessory-request (acc method path body)
+(defun handle-accessory-request (acc method path body &optional connection)
   "Dispatch a decrypted request to the accessory model.  Returns a REPLY."
   (cond
     ((and (string= method "GET") (eql 0 (search "/accessories" path)))
@@ -175,5 +184,70 @@ Returns a list of (aid . iid)."
     ((and (string= method "GET") (eql 0 (search "/characteristics" path)))
      (handle-get-characteristics acc path))
     ((and (string= method "PUT") (eql 0 (search "/characteristics" path)))
-     (handle-put-characteristics acc body))
+     (handle-put-characteristics acc body connection))
     (t (make-reply "404 Not Found" nil nil))))
+
+;;; --- events (M5): per-connection subscriptions + server push (HAP §6.8) -----
+;;;
+;;; A controller subscribes with PUT {"aid","iid","ev":true}; when the value
+;;; later changes the accessory pushes an EVENT/1.0 message — an HTTP-shaped
+;;; frame with an EVENT/1.0 status line — down the same encrypted connection.
+
+(defstruct hap-connection
+  stream                                   ; the encrypted SECURE-STREAM
+  (lock (bordeaux-threads:make-lock "hap-conn"))
+  (subscribed '()))                        ; HAP-CHARs this connection watches
+
+(defvar *subscription-lock* (bordeaux-threads:make-lock "hap-subscriptions")
+  "Guards the char<->connection subscription lists (touched by the connection
+thread on PUT and by whatever thread calls UPDATE-CHARACTERISTIC).")
+
+(defun subscribe-characteristic (conn char)
+  (bordeaux-threads:with-lock-held (*subscription-lock*)
+    (pushnew conn (hap-char-subscribers char))
+    (pushnew char (hap-connection-subscribed conn))))
+
+(defun unsubscribe-characteristic (conn char)
+  (bordeaux-threads:with-lock-held (*subscription-lock*)
+    (setf (hap-char-subscribers char) (remove conn (hap-char-subscribers char)))
+    (setf (hap-connection-subscribed conn) (remove char (hap-connection-subscribed conn)))))
+
+(defun connection-unsubscribe-all (conn)
+  "Drop every subscription held by CONN (called when its connection closes)."
+  (bordeaux-threads:with-lock-held (*subscription-lock*)
+    (dolist (char (hap-connection-subscribed conn))
+      (setf (hap-char-subscribers char) (remove conn (hap-char-subscribers char))))
+    (setf (hap-connection-subscribed conn) '())))
+
+(defun event-octets (acc chars)
+  (s->octets
+   (com.inuoe.jzon:stringify
+    (%obj "characteristics"
+          (map 'vector (lambda (c) (%obj "aid" (accessory-aid acc)
+                                         "iid" (hap-char-iid c)
+                                         "value" (hap-char-value c)))
+               chars)))))
+
+(defun write-event (conn acc chars)
+  "Push an EVENT/1.0 notification carrying CHARS' current values to CONN, under
+the connection's write lock so it can't interleave with a response."
+  (let ((body (event-octets acc chars))
+        (stream (hap-connection-stream conn)))
+    (bordeaux-threads:with-lock-held ((hap-connection-lock conn))
+      (write-sequence
+       (s->octets (format nil "EVENT/1.0 200 OK~C~CContent-Type: application/hap+json~C~C~
+                               Content-Length: ~D~C~C~C~C"
+                          #\Return #\Newline #\Return #\Newline
+                          (length body) #\Return #\Newline #\Return #\Newline))
+       stream)
+      (write-sequence body stream)
+      (finish-output stream))))
+
+(defun update-characteristic (acc char value)
+  "Set CHAR's value and push an EVENT to every subscribed connection.  This is the
+server-side API a real accessory calls when its own state changes (a sensor
+reading, a physical switch, a timer)."
+  (setf (hap-char-value char) value)
+  (dolist (conn (bordeaux-threads:with-lock-held (*subscription-lock*)
+                  (copy-list (hap-char-subscribers char))))
+    (ignore-errors (write-event conn acc (list char)))))

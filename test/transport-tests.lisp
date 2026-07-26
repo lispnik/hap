@@ -94,3 +94,38 @@ characteristic — flipping a real server-side 'light' — and reads it back."
                      (ignore-errors (sb-bsd-sockets:socket-close socket)))))
             (stop-accessory server))))
     (error (e) (skip "loopback encrypted control unavailable: ~A" e))))
+
+(test event-notification-over-loopback
+  "M5: a controller subscribes to the On characteristic; a server-side
+UPDATE-CHARACTERISTIC then pushes an EVENT/1.0 the controller receives — the same
+mechanism Home uses to reflect a physical switch flip in real time."
+  (handler-case
+      (let* ((code "778-99-000")
+             (acc (make-hap-accessory :name "Sensor" :category 5
+                                      :setup-code code :port 0)))
+        (ensure-accessory-information acc)
+        (let ((on (add-lightbulb acc))
+              (server (serve-accessory acc))
+              (ctrl (make-hap-controller)))
+          (unwind-protect
+               (let ((cs (pair-with-accessory ctrl "127.0.0.1" (hap-server-port server) code)))
+                 (multiple-value-bind (socket stream)
+                     (verify-with-accessory ctrl cs "127.0.0.1" (hap-server-port server))
+                   (unwind-protect
+                        (let ((iid (hap::hap-char-iid on)))
+                          (multiple-value-bind (body status) (hap-subscribe stream 1 iid)
+                            (declare (ignore body))
+                            (is (eql 204 status)))
+                          ;; the subscription is registered by the time the 204 returns
+                          (is (hap::hap-char-subscribers on))
+                          ;; the accessory's own state changes -> a push
+                          (update-characteristic acc on t)
+                          (let ((chars (read-hap-event stream)))
+                            (is (not (null chars)))
+                            (let ((c (aref chars 0)))
+                              (is (eql 1 (gethash "aid" c)))
+                              (is (eql iid (gethash "iid" c)))
+                              (is (eq t (gethash "value" c))))))
+                     (ignore-errors (sb-bsd-sockets:socket-close socket)))))
+            (stop-accessory server))))
+    (error (e) (skip "loopback events unavailable: ~A" e))))

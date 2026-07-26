@@ -57,3 +57,26 @@ responder lifecycle.)  Skips if the sandbox forbids binding 5353."
         (stop-advertising acc)
         (is (null (hap::accessory-responder acc))))
     (error (e) (skip "advertising unavailable in this environment: ~A" e))))
+
+(test discovered-accessory-info-parses-hap-txt
+  "M6: a controller parses a discovered accessory's `_hap._tcp` TXT record into
+usable metadata (this is the read side of discovery; live browsing needs the
+multicast entitlement)."
+  (let* ((acc (make-hap-accessory :name "Discoverable" :model "cl-hap" :category 5))
+         (si (0conf:make-service-info :type "_hap._tcp.local" :name "Discoverable"
+                                      :host "disc.local" :port 51999
+                                      :txt (accessory-txt acc)))
+         (info (accessory-advertisement-info si)))
+    (is (string= "Discoverable" (getf info :name)))
+    (is (= 51999 (getf info :port)))
+    (is (string= (accessory-id acc) (getf info :id)))
+    (is (string= "cl-hap" (getf info :model)))
+    (is (eql 5 (getf info :category)))
+    (is (null (getf info :paired)))            ; sf bit0=1 (unpaired) -> :paired NIL
+    (is (string= "1.1" (getf info :protocol-version)))
+    ;; once paired, sf bit0 clears and :paired flips true
+    (setf (accessory-paired acc) t)
+    (let ((info2 (accessory-advertisement-info
+                  (0conf:make-service-info :type "_hap._tcp.local" :name "Discoverable"
+                                           :port 51999 :txt (accessory-txt acc)))))
+      (is (eq t (getf info2 :paired))))))
