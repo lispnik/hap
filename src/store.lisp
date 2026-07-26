@@ -9,6 +9,13 @@
 (defun %hex (bytes) (ironclad:byte-array-to-hex-string bytes))
 (defun %unhex (s) (ironclad:hex-string-to-byte-array s))
 
+(defun maybe-persist (acc)
+  "If ACC has a STORE-PATH, re-save it (called after pair/unpair changes).  Errors
+are swallowed — a persistence failure must not break the live protocol."
+  (when (accessory-store-path acc)
+    (ignore-errors (save-accessory acc (accessory-store-path acc))))
+  acc)
+
 (defun save-accessory (acc path)
   "Persist ACC (identity, config, and paired controllers) to PATH."
   (with-open-file (out path :direction :output :if-exists :supersede
@@ -28,7 +35,8 @@
                    :controllers (loop for id being the hash-keys
                                         of (accessory-paired-controllers acc)
                                           using (hash-value ltpk)
-                                      collect (cons id (%hex ltpk))))
+                                      collect (list id (%hex ltpk)
+                                                    (and (gethash id (accessory-paired-permissions acc)) t))))
              out)))
   acc)
 
@@ -44,7 +52,14 @@
                                :port (getf p :port)
                                :seed (%unhex (getf p :seed))
                                :public (%unhex (getf p :public))
-                               :paired (and (getf p :controllers) t))))
-      (loop for (id . ltpk) in (getf p :controllers)
-            do (setf (gethash id (accessory-paired-controllers acc)) (%unhex ltpk)))
+                               :paired (and (getf p :controllers) t)
+                               ;; keep persisting to the file it was loaded from
+                               :store-path path)))
+      (loop for entry in (getf p :controllers)
+            ;; new format (id hex admin-p); tolerate the old (id . hex) too
+            for id = (first entry)
+            for hex = (if (consp (cdr entry)) (second entry) (cdr entry))
+            for admin = (and (consp (cdr entry)) (third entry))
+            do (setf (gethash id (accessory-paired-controllers acc)) (%unhex hex)
+                     (gethash id (accessory-paired-permissions acc)) admin))
       acc)))

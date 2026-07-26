@@ -63,3 +63,81 @@ is rejected at M4."
       (is (= hap::+tlv-error-authentication+
              (tlv8-get-integer (tlv8-decode v4) +tlv-error+)))
       (is (null (hap::verify-session-session vs))))))
+
+(test pairings-add-list-remove-with-admin-gating
+  "AddPairing/ListPairings/RemovePairing (§5.10-5.12): the first controller is an
+admin, can add a second (regular) controller and list both, a non-admin is refused,
+and removing every controller reverts the accessory to unpaired."
+  (let* ((code "111-22-333")
+         (acc (make-hap-accessory :setup-code code))
+         (ctrl (make-hap-controller))
+         (cs (run-pair-setup acc ctrl code))
+         (admin-id (controller-pairing-id ctrl))
+         (c2 (make-hap-controller))
+         (c2-id (controller-pairing-id c2)))
+    (declare (ignore cs))
+    (is (hap::accessory-controller-admin-p acc admin-id))     ; setup controller is admin
+    ;; admin adds a second, regular-user controller
+    (let ((add (hap::dispatch-pairings acc admin-id
+                (tlv8-encode (list (cons +tlv-method+ hap::+pairing-method-add+)
+                                   (cons +tlv-identifier+ (hap::s->octets c2-id))
+                                   (cons +tlv-public-key+ (controller-public c2))
+                                   (cons +tlv-permissions+ 0))))))
+      (is (= 2 (tlv8-get-integer (tlv8-decode add) +tlv-state+)))
+      (is (equalp (controller-public c2) (gethash c2-id (accessory-paired-controllers acc))))
+      (is (not (hap::accessory-controller-admin-p acc c2-id))))
+    ;; list shows both
+    (let* ((items (tlv8-decode (hap::dispatch-pairings acc admin-id
+                    (tlv8-encode (list (cons +tlv-method+ hap::+pairing-method-list+))))))
+           (ids (loop for i in items when (= (car i) +tlv-identifier+)
+                      collect (hap::octets->string (cdr i)))))
+      (is (= 2 (length ids)))
+      (is (member admin-id ids :test #'string=))
+      (is (member c2-id ids :test #'string=)))
+    ;; a non-admin controller is refused
+    (is (= hap::+tlv-error-authentication+
+           (tlv8-get-integer (tlv8-decode
+             (hap::dispatch-pairings acc c2-id
+               (tlv8-encode (list (cons +tlv-method+ hap::+pairing-method-list+)))))
+             +tlv-error+)))
+    ;; remove the second controller — still paired (admin remains)
+    (hap::dispatch-pairings acc admin-id
+      (tlv8-encode (list (cons +tlv-method+ hap::+pairing-method-remove+)
+                         (cons +tlv-identifier+ (hap::s->octets c2-id)))))
+    (is (null (gethash c2-id (accessory-paired-controllers acc))))
+    (is (accessory-paired acc))
+    ;; remove the last (admin) controller — now unpaired
+    (hap::dispatch-pairings acc admin-id
+      (tlv8-encode (list (cons +tlv-method+ hap::+pairing-method-remove+)
+                         (cons +tlv-identifier+ (hap::s->octets admin-id)))))
+    (is (not (accessory-paired acc)))))
+
+(test session-frames-large-payload-across-multiple-frames
+  "A payload larger than one 1024-byte frame is split into several and the peer
+reassembles it (the >1024B path the loopback capstone didn't reach)."
+  (let* ((shared (ironclad:random-data 32))
+         (a (hap::make-session-keys shared :accessory))
+         (c (hap::make-session-keys shared :controller))
+         (msg (hap::s->octets (make-string 5000 :initial-element #\z))))
+    (let ((framed (hap::session-encrypt a msg)))
+      (is (= (+ 5000 (* 5 18)) (length framed)))   ; 5 frames, each +2 len +16 tag
+      (is (equalp msg (hap::session-decrypt c framed))))))
+
+(test pairing-auto-persists-when-store-path-set
+  "With a STORE-PATH set, completing Pair-Setup writes the pairing to disk, and the
+reloaded accessory keeps its admin controller and continues persisting there."
+  (let* ((code "111-22-333")
+         (path (format nil "/tmp/hap-persist-~A.lisp" (random 1000000 (make-random-state t))))
+         (acc (make-hap-accessory :setup-code code :store-path path))
+         (ctrl (make-hap-controller)))
+    (unwind-protect
+         (progn
+           (run-pair-setup acc ctrl code)                 ; M6 -> maybe-persist
+           (is (probe-file path))
+           (let ((back (load-accessory path)))
+             (is (accessory-paired back))
+             (is (equalp (controller-public ctrl)
+                         (gethash (controller-pairing-id ctrl) (accessory-paired-controllers back))))
+             (is (hap::accessory-controller-admin-p back (controller-pairing-id ctrl)))
+             (is (string= path (accessory-store-path back)))))
+      (ignore-errors (delete-file path)))))

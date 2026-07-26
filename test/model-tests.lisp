@@ -65,3 +65,45 @@ a subsequent GET reports the new value."
                         "{\"characteristics\":[{\"aid\":1,\"iid\":4,\"value\":\"hacked\"}]}"))))
       (is (not (string= "204 No Content" (hap::reply-status reply))))
       (is (string= "cl-hap" (hap::hap-char-value model))))))  ; unchanged
+
+(test ensure-adds-protocol-information-service
+  "ensure-accessory-information provides both mandatory services: Accessory
+Information (3E) and Protocol Information (A2 with a Version characteristic)."
+  (let ((acc (make-hap-accessory)))
+    (ensure-accessory-information acc)
+    (let ((types (mapcar #'hap::hap-service-type (accessory-services acc))))
+      (is (member "3E" types :test #'string=))
+      (is (member "A2" types :test #'string=)))
+    (let* ((db (json-parse (hap::accessories-json acc)))
+           (svcs (gethash "services" (aref (gethash "accessories" db) 0)))
+           (pinfo (find "A2" svcs :key (lambda (s) (gethash "type" s)) :test #'string=))
+           (ver (aref (gethash "characteristics" pinfo) 0)))
+      (is (string= "37" (gethash "type" ver)))
+      (is (string= "1.1.0" (gethash "value" ver))))))
+
+(test characteristic-metadata-serializes
+  "Numeric/enum metadata (minValue/maxValue/minStep/unit/valid-values) appears in
+the /accessories JSON only when set."
+  (let ((c (make-hap-char :iid 9 :type "8" :value 50 :perms '("pr" "pw")
+                          :format "int" :min-value 0 :max-value 100 :min-step 1
+                          :unit "percentage" :valid-values '(0 50 100))))
+    (let ((h (hap::char->json c)))
+      (is (eql 0 (gethash "minValue" h)))
+      (is (eql 100 (gethash "maxValue" h)))
+      (is (eql 1 (gethash "minStep" h)))
+      (is (string= "percentage" (gethash "unit" h)))
+      (is (equalp #(0 50 100) (gethash "valid-values" h))))
+    ;; a bare bool characteristic emits none of them
+    (let ((h (hap::char->json (make-hap-char :iid 1 :type "25" :value nil))))
+      (is (null (nth-value 1 (gethash "minValue" h))))
+      (is (null (nth-value 1 (gethash "unit" h)))))))
+
+(test random-setup-code-is-well-formed
+  "A generated setup code is DDD-DD-DDD and never one of the disallowed codes."
+  (dotimes (i 50)
+    (let ((code (hap::random-setup-code)))
+      (is (= 10 (length code)))
+      (is (char= #\- (char code 3)))
+      (is (char= #\- (char code 6)))
+      (is (every (lambda (ch) (or (digit-char-p ch) (char= ch #\-))) code))
+      (is (not (member code hap::+invalid-setup-codes+ :test #'string=))))))

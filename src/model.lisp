@@ -16,6 +16,11 @@
   (value nil)               ; current value (bool t/nil, string, or number)
   (perms '("pr"))           ; permissions: "pr" read, "pw" write, "ev" events
   (format "bool")           ; HAP format: bool / string / int / uint8 / float …
+  (min-value nil)           ; numeric metadata — emitted in /accessories when set
+  (max-value nil)
+  (min-step nil)
+  (unit nil)                ; e.g. "percentage", "celsius", "arcdegrees"
+  (valid-values nil)        ; a list of the allowed enum values
   (on-write nil)            ; optional (lambda (value) …) called on a PUT
   (subscribers '()))        ; HAP-CONNECTIONs subscribed to EVENT notifications
 
@@ -24,8 +29,17 @@
   type                      ; service UUID, short HAP form e.g. "43" (Lightbulb)
   (characteristics '()))
 
+(defstruct hap-connection
+  "One verified, encrypted controller connection (used for event delivery and the
+admin check on /pairings)."
+  stream                                   ; the encrypted SECURE-STREAM
+  controller-id                            ; pairing id of the verified controller
+  (lock (bordeaux-threads:make-lock "hap-conn"))
+  (subscribed '()))                        ; HAP-CHARs this connection watches
+
 ;;; Standard short UUIDs (HAP spec §8/§9).
 (defparameter +svc-accessory-information+ "3E")
+(defparameter +svc-protocol-information+ "A2")
 (defparameter +svc-lightbulb+ "43")
 (defparameter +svc-switch+    "49")
 (defparameter +char-identify+ "14")
@@ -34,6 +48,7 @@
 (defparameter +char-name+     "23")
 (defparameter +char-serial+   "30")
 (defparameter +char-firmware+ "52")
+(defparameter +char-version+  "37")
 (defparameter +char-on+       "25")
 
 (defun accessory-information-service (acc &key (iid 1))
@@ -61,10 +76,35 @@ HAP-CHAR so callers can read/observe it.  ON-WRITE, if given, is (lambda (bool))
                          (list on
                                (make-hap-char :iid (+ iid 2) :type +char-name+
                                               :value name :perms '("pr") :format "string"))))))
+    (note-database-change acc)
     on))
 
+(defun note-database-change (acc)
+  "Call after the accessory database changes.  While the accessory is advertising,
+bump the config number (c#) and re-publish so controllers know to re-read
+/accessories (HAP §6.4).  Before advertising it is a no-op, so building the model
+at startup doesn't inflate c#."
+  (when (accessory-responder acc)
+    (incf (accessory-config-number acc))
+    (update-accessory-advertisement acc)
+    (maybe-persist acc))
+  acc)
+
+(defun protocol-information-service (&key (iid 100))
+  "The HAP Protocol Information service (§8.15): a Version characteristic
+advertising the HAP version the accessory speaks."
+  (make-hap-service
+   :iid iid :type +svc-protocol-information+
+   :characteristics
+   (list (make-hap-char :iid (+ iid 1) :type +char-version+ :value "1.1.0"
+                        :perms '("pr") :format "string"))))
+
 (defun ensure-accessory-information (acc)
-  "Make sure ACC has the mandatory Accessory Information service (as its first)."
+  "Make sure ACC has the two mandatory services — Accessory Information (first)
+and Protocol Information."
+  (unless (find +svc-protocol-information+ (accessory-services acc)
+                :key #'hap-service-type :test #'string=)
+    (push (protocol-information-service) (accessory-services acc)))
   (unless (find +svc-accessory-information+ (accessory-services acc)
                 :key #'hap-service-type :test #'string=)
     (push (accessory-information-service acc) (accessory-services acc)))
@@ -99,6 +139,13 @@ HAP-CHAR so callers can read/observe it.  ON-WRITE, if given, is (lambda (bool))
                  "format" (hap-char-format c))))
     (when (char-readable-p c)
       (setf (gethash "value" h) (hap-char-value c)))   ; NIL -> false, for bool
+    ;; numeric/enum metadata — controllers need these for non-bool characteristics
+    (when (hap-char-min-value c) (setf (gethash "minValue" h) (hap-char-min-value c)))
+    (when (hap-char-max-value c) (setf (gethash "maxValue" h) (hap-char-max-value c)))
+    (when (hap-char-min-step c)  (setf (gethash "minStep" h)  (hap-char-min-step c)))
+    (when (hap-char-unit c)      (setf (gethash "unit" h)     (hap-char-unit c)))
+    (when (hap-char-valid-values c)
+      (setf (gethash "valid-values" h) (coerce (hap-char-valid-values c) 'vector)))
     h))
 
 (defun service->json (svc)
@@ -176,6 +223,12 @@ event subscription/unsubscription (needs CONNECTION).  204 on full success."
         (no-content)
         (json-reply (s->octets "{\"status\":-70404}") "207 Multi-Status"))))
 
+(defun run-identify (acc)
+  "Run the accessory's identify routine (blink an LED, etc.), if it has one."
+  (when (accessory-on-identify acc)
+    (ignore-errors (funcall (accessory-on-identify acc))))
+  acc)
+
 (defun handle-accessory-request (acc method path body &optional connection)
   "Dispatch a decrypted request to the accessory model.  Returns a REPLY."
   (cond
@@ -185,6 +238,13 @@ event subscription/unsubscription (needs CONNECTION).  204 on full success."
      (handle-get-characteristics acc path))
     ((and (string= method "PUT") (eql 0 (search "/characteristics" path)))
      (handle-put-characteristics acc body connection))
+    ;; /pairings is TLV8 over the session; only an admin controller may use it
+    ((and (string= method "POST") (eql 0 (search "/pairings" path)))
+     (tlv-reply (dispatch-pairings acc (and connection (hap-connection-controller-id connection)) body)))
+    ;; a paired controller identifying via POST /identify is refused here — once
+    ;; paired, identify is the Identify *characteristic*, not this endpoint
+    ((and (string= method "POST") (eql 0 (search "/identify" path)))
+     (make-reply "400 Bad Request" nil nil))
     (t (make-reply "404 Not Found" nil nil))))
 
 ;;; --- events (M5): per-connection subscriptions + server push (HAP §6.8) -----
@@ -192,11 +252,6 @@ event subscription/unsubscription (needs CONNECTION).  204 on full success."
 ;;; A controller subscribes with PUT {"aid","iid","ev":true}; when the value
 ;;; later changes the accessory pushes an EVENT/1.0 message — an HTTP-shaped
 ;;; frame with an EVENT/1.0 status line — down the same encrypted connection.
-
-(defstruct hap-connection
-  stream                                   ; the encrypted SECURE-STREAM
-  (lock (bordeaux-threads:make-lock "hap-conn"))
-  (subscribed '()))                        ; HAP-CHARs this connection watches
 
 (defvar *subscription-lock* (bordeaux-threads:make-lock "hap-subscriptions")
   "Guards the char<->connection subscription lists (touched by the connection

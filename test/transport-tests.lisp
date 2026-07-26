@@ -129,3 +129,59 @@ mechanism Home uses to reflect a physical switch flip in real time."
                      (ignore-errors (sb-bsd-sockets:socket-close socket)))))
             (stop-accessory server))))
     (error (e) (skip "loopback events unavailable: ~A" e))))
+
+(test pairings-management-over-loopback
+  "Over the encrypted session an admin controller lists pairings, adds a second
+controller, and removes it — the /pairings endpoint end to end."
+  (handler-case
+      (let* ((code "525-15-926")
+             (acc (make-hap-accessory :name "Managed" :category 5
+                                      :setup-code code :port 0)))
+        (ensure-accessory-information acc)
+        (add-lightbulb acc)
+        (let ((server (serve-accessory acc))
+              (ctrl (make-hap-controller))
+              (c2 (make-hap-controller)))
+          (unwind-protect
+               (let ((cs (pair-with-accessory ctrl "127.0.0.1" (hap-server-port server) code)))
+                 (multiple-value-bind (socket stream)
+                     (verify-with-accessory ctrl cs "127.0.0.1" (hap-server-port server))
+                   (unwind-protect
+                        (progn
+                          (is (= 1 (length (hap-list-pairings stream))))    ; just the admin
+                          (hap-add-pairing stream (controller-pairing-id c2) (controller-public c2))
+                          (let ((lst (hap-list-pairings stream)))
+                            (is (= 2 (length lst)))
+                            (is (member (controller-pairing-id c2) lst
+                                        :key (lambda (p) (getf p :id)) :test #'string=)))
+                          (hap-remove-pairing stream (controller-pairing-id c2))
+                          (is (= 1 (length (hap-list-pairings stream)))))
+                     (ignore-errors (sb-bsd-sockets:socket-close socket)))))
+            (stop-accessory server))))
+    (error (e) (skip "loopback pairings management unavailable: ~A" e))))
+
+(test identify-over-loopback
+  "An unpaired accessory answers POST /identify (plaintext, pre-pairing) by running
+its identify routine and returning 204."
+  (handler-case
+      (let* ((fired nil)
+             (acc (make-hap-accessory :name "Identify Me" :category 5 :port 0
+                                      :on-identify (lambda () (setf fired t))))
+             (server (serve-accessory acc)))
+        (unwind-protect
+             (let ((socket (make-instance 'sb-bsd-sockets:inet-socket
+                                          :type :stream :protocol :tcp)))
+               (sb-bsd-sockets:socket-connect socket (0conf:parse-ipv4 "127.0.0.1")
+                                              (hap-server-port server))
+               (let ((stream (hap::socket-stream socket)))
+                 (unwind-protect
+                      (progn
+                        (hap::write-http-post stream "/identify"
+                                              (make-array 0 :element-type '(unsigned-byte 8)))
+                        (multiple-value-bind (body status) (hap::read-http-response stream)
+                          (declare (ignore body))
+                          (is (eql 204 status))
+                          (is (eq t fired))))
+                   (ignore-errors (sb-bsd-sockets:socket-close socket)))))
+          (stop-accessory server)))
+    (error (e) (skip "loopback identify unavailable: ~A" e))))

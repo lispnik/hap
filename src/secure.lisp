@@ -122,7 +122,8 @@ buffers and tests.)"
 ;;; Pair-Verify — accessory side
 ;;; ==========================================================================
 
-(defstruct verify-session accessory ephemeral shared session-key controller-pub session)
+(defstruct verify-session accessory ephemeral shared session-key controller-pub session
+           controller-id)                ; pairing id of the verified controller
 
 (defun pair-verify-m2 (vs m1-tlv)
   "Respond to the controller's M1 (its ephemeral pubkey) with M2: the accessory's
@@ -163,7 +164,8 @@ Pair-Setup and, on success, establish the encrypted session."
                             (x25519-keypair-public-bytes (verify-session-ephemeral vs)))))
         (unless (ed25519-verify ctrl-ltpk ctrl-info ctrl-sig)
           (return-from pair-verify-m4 (error-tlv 4 +tlv-error-authentication+)))
-        (setf (verify-session-session vs)
+        (setf (verify-session-controller-id vs) ctrl-id
+              (verify-session-session vs)
               (make-session-keys (verify-session-shared vs) :accessory))
         (tlv8-encode (list (cons +tlv-state+ 4)))))))
 

@@ -18,14 +18,18 @@
    #:accessory-setup-code #:accessory-setup-id #:accessory-port #:accessory-paired
    #:accessory-txt #:advertise-accessory #:update-accessory-advertisement
    #:stop-advertising #:accessory-paired #:accessory-paired-controllers
-   #:accessory-aid #:accessory-services
+   #:accessory-paired-permissions #:accessory-aid #:accessory-services
+   #:accessory-on-identify #:accessory-store-path #:random-setup-code
    ;; accessory model (services / characteristics)
    #:hap-service #:make-hap-service #:hap-service-iid #:hap-service-type
    #:hap-service-characteristics
    #:hap-char #:make-hap-char #:hap-char-iid #:hap-char-type #:hap-char-value
    #:hap-char-perms #:hap-char-format #:hap-char-on-write
-   #:accessory-information-service #:ensure-accessory-information #:add-lightbulb
-   #:find-characteristic #:update-characteristic
+   #:hap-char-min-value #:hap-char-max-value #:hap-char-min-step
+   #:hap-char-unit #:hap-char-valid-values
+   #:accessory-information-service #:protocol-information-service
+   #:ensure-accessory-information #:add-lightbulb
+   #:find-characteristic #:update-characteristic #:note-database-change #:run-identify
    ;; events (server push)
    #:hap-connection #:subscribe-characteristic #:unsubscribe-characteristic
    ;; pairing (controller role)
@@ -35,5 +39,6 @@
    #:serve-accessory #:stop-accessory #:hap-server #:hap-server-port
    #:pair-with-accessory #:verify-with-accessory #:hap-get #:hap-put
    #:hap-subscribe #:read-hap-event
+   #:hap-list-pairings #:hap-add-pairing #:hap-remove-pairing
    ;; controller discovery (M6)
    #:discover-accessories #:accessory-advertisement-info))

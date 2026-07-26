@@ -21,11 +21,11 @@ SBCL only (the transport uses `sb-bsd-sockets` and SBCL Gray streams).
 | `src/crypto.lisp` | ironclad facade + hand-built ChaCha20-Poly1305 (RFC 8439) & HKDF (RFC 5869) | ✅ |
 | `src/srp.lisp` | SRP-6a, 3072-bit group, SHA-512 (RFC 5054) | ✅ |
 | `src/discovery.lisp` | `_hap._tcp` advertisement + TXT, on 0conf | ✅ |
-| `src/pairing.lisp` | Pair-Setup M1–M6 (SRP + Ed25519), both roles | ✅ |
+| `src/pairing.lisp` | Pair-Setup M1–M6 (SRP + Ed25519) + Pairings add/remove/list, lockout | ✅ |
 | `src/secure.lisp` | Pair-Verify M1–M4 (X25519 + Ed25519) + the encrypted session | ✅ |
-| `src/store.lisp` | File-backed persistence of the identity + paired controllers | ✅ |
+| `src/store.lisp` | File-backed persistence (identity, pairings, permissions), auto-save | ✅ |
 | `src/http.lisp` | The minimal HAP HTTP/1.1 (persistent, TLV8 + hap+json + EVENT) | ✅ |
-| `src/model.lisp` | Accessory / service / characteristic model, JSON, events | ✅ |
+| `src/model.lisp` | Accessory / service / characteristic model, JSON, metadata, events, /identify | ✅ |
 | `src/transport.lisp` | TCP server (accessory) + client (controller) | ✅ |
 
 Every crypto primitive is gated on published test vectors (RFC 8439, RFC 5869,
@@ -33,13 +33,18 @@ RFC 5054) before anything is built on it.
 
 ## Status
 
-Milestones **M1–M6 complete**: an accessory advertises, pairs (Pair-Setup),
-verifies (Pair-Verify), serves its accessory database and characteristics over a
-ChaCha20-Poly1305 session, and pushes `EVENT` change notifications; the controller
-side pairs, verifies, reads, writes, subscribes, and discovers. 122 tests, all
-green — including a full loopback capstone (a Lisp controller pairs → verifies →
-reads `/accessories` → toggles a Lightbulb → receives the pushed event, all over
-the encrypted channel, no multicast required).
+Milestones **M1–M6 complete**, plus a real-accessory hardening pass: an accessory
+advertises, pairs (Pair-Setup, with attempt lockout + single-session + a random
+per-accessory setup code), verifies (Pair-Verify), serves its accessory database
+and characteristics (with numeric/enum metadata) over a ChaCha20-Poly1305 session,
+pushes `EVENT` change notifications, manages additional controllers via
+`/pairings` (add/remove/list with admin gating), answers `/identify`, advertises
+the Protocol Information service, bumps `c#` on database changes, and persists
+pairings on change; the controller side pairs, verifies, reads, writes,
+subscribes, discovers, and manages pairings. **413 tests, all green** — including
+a full loopback capstone (a Lisp controller pairs → verifies → reads
+`/accessories` → toggles a Lightbulb → receives the pushed event, all over the
+encrypted channel, no multicast required).
 
 ## Use
 

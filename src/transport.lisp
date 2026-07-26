@@ -50,11 +50,18 @@ SECURE-STREAM, over which the /accessories and /characteristics traffic flows."
                ;; pairing traffic — plaintext, TLV8
                ((string= path "/pair-setup")
                 (write-http-response raw (dispatch-pair-setup pair-session body)))
+               ;; POST /identify (unpaired only) — plaintext, before any session
+               ((and (string= method "POST") (eql 0 (search "/identify" path)) (not secure))
+                (if (accessory-paired acc)
+                    (write-reply raw (make-reply "400 Bad Request" nil nil))
+                    (progn (run-identify acc) (write-reply raw (no-content)))))
                ((eql 0 (search "/pair-verify" path))
                 (write-http-response raw (dispatch-pair-verify verify body))
                 (when (and (verify-session-session verify) (not secure))
                   (setf secure (make-secure-stream raw (verify-session-session verify))
-                        connection (make-hap-connection :stream secure))))
+                        connection (make-hap-connection
+                                    :stream secure
+                                    :controller-id (verify-session-controller-id verify)))))
                ;; the accessory model — only over the encrypted session.  The
                ;; reply goes out under the connection lock so a concurrent
                ;; UPDATE-CHARACTERISTIC event push can't interleave with it.
@@ -65,6 +72,7 @@ SECURE-STREAM, over which the /accessories and /characteristics traffic flows."
                (t (write-reply raw (make-reply "470 Connection Authorization Required"
                                                nil nil))))))
       (when connection (connection-unsubscribe-all connection))
+      (pair-setup-end acc pair-session)   ; free the setup slot if we held it
       (ignore-errors (sb-bsd-sockets:socket-close conn)))))
 
 (defun accept-loop (server)
@@ -158,6 +166,51 @@ transparently ChaCha20-Poly1305-encrypted.  Caller closes the socket when done."
   (hap-put stream "/characteristics"
            (s->octets (format nil "{\"characteristics\":[{\"aid\":~D,\"iid\":~D,\"ev\":true}]}"
                               aid iid))))
+
+;;; --- controller /pairings helpers (over the encrypted session) -------------
+
+(defun hap-list-pairings (stream)
+  "As an admin controller, list every controller paired to the accessory.  Returns
+a list of plists (:id :ltpk :admin)."
+  (write-http-post stream "/pairings"
+                   (tlv8-encode (list (cons +tlv-state+ 1)
+                                      (cons +tlv-method+ +pairing-method-list+))))
+  (let* ((items (tlv8-decode (read-http-response stream)))
+         (out '()) (current '()))
+    ;; items are id/ltpk/perm groups split by Separator (0xFF)
+    (dolist (item items)
+      (cond
+        ((= (car item) +tlv-separator+)
+         (when current (push (nreverse current) out) (setf current '())))
+        ((= (car item) +tlv-identifier+) (push (cons :id (octets->string (cdr item))) current))
+        ((= (car item) +tlv-public-key+) (push (cons :ltpk (cdr item)) current))
+        ((= (car item) +tlv-permissions+)
+         (push (cons :admin (eql 1 (if (integerp (cdr item))
+                                       (cdr item) (le-octets->integer (cdr item)))))
+               current))))
+    (when current (push (nreverse current) out))
+    (mapcar (lambda (g) (list :id (cdr (assoc :id g)) :ltpk (cdr (assoc :ltpk g))
+                              :admin (cdr (assoc :admin g))))
+            (nreverse out))))
+
+(defun hap-remove-pairing (stream id)
+  "As an admin controller, remove the controller with pairing id ID.  Returns the
+accessory's response body octets (State=2 on success)."
+  (write-http-post stream "/pairings"
+                   (tlv8-encode (list (cons +tlv-state+ 1)
+                                      (cons +tlv-method+ +pairing-method-remove+)
+                                      (cons +tlv-identifier+ (s->octets id)))))
+  (read-http-response stream))
+
+(defun hap-add-pairing (stream id ltpk &key admin)
+  "As an admin controller, add controller ID with long-term public key LTPK."
+  (write-http-post stream "/pairings"
+                   (tlv8-encode (list (cons +tlv-state+ 1)
+                                      (cons +tlv-method+ +pairing-method-add+)
+                                      (cons +tlv-identifier+ (s->octets id))
+                                      (cons +tlv-public-key+ ltpk)
+                                      (cons +tlv-permissions+ (if admin 1 0)))))
+  (read-http-response stream))
 
 (defun read-hap-event (stream)
   "Read one pushed EVENT/1.0 (or response) message from STREAM.  Returns its parsed

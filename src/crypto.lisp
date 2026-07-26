@@ -92,9 +92,15 @@ subsequent encryption uses counter 1+ (RFC 8439 §2.6/§2.8)."
     (%make-x25519-keypair :private priv :public-bytes (ironclad:curve25519-key-y pub))))
 
 (defun x25519-shared-secret (keypair their-public-bytes)
-  "The X25519 shared secret between our KEYPAIR and the peer's raw public key."
-  (ironclad:diffie-hellman (x25519-keypair-private keypair)
-                           (ironclad:make-public-key :curve25519 :y their-public-bytes)))
+  "The X25519 shared secret between our KEYPAIR and the peer's raw public key.
+Rejects an all-zero result: that is what a low-order/degenerate peer public key
+produces, and continuing would key the session off a value the peer controls."
+  (let ((secret (ironclad:diffie-hellman
+                 (x25519-keypair-private keypair)
+                 (ironclad:make-public-key :curve25519 :y their-public-bytes))))
+    (when (every #'zerop secret)
+      (error "X25519 produced an all-zero shared secret (invalid peer public key)"))
+    secret))
 
 ;;; --- HKDF (RFC 5869) -------------------------------------------------------
 ;;;

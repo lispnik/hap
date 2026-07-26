@@ -16,9 +16,20 @@
 (defparameter +ps-accessory-sign-salt+ "Pair-Setup-Accessory-Sign-Salt")
 (defparameter +ps-accessory-sign-info+ "Pair-Setup-Accessory-Sign-Info")
 
+(defconstant +tlv-error-unknown+ 1)
 (defconstant +tlv-error-authentication+ 2)
 (defconstant +tlv-error-max-tries+ 5)
+(defconstant +tlv-error-unavailable+ 6)
 (defconstant +tlv-error-busy+ 7)
+
+(defparameter *max-pair-attempts* 100
+  "How many wrong setup-code attempts before the accessory locks Pair-Setup
+(HAP mandates a cap with escalating delay; we use a hard cap).")
+
+;;; HAP Pairings methods (the TLV Method value on /pairings, HAP §5.10-5.12).
+(defconstant +pairing-method-add+ 3)
+(defconstant +pairing-method-remove+ 4)
+(defconstant +pairing-method-list+ 5)
 
 (defun ps-nonce (name)
   "An 8-char HAP nonce name -> 12-byte ChaCha20-Poly1305 nonce (4 zero bytes first)."
@@ -40,19 +51,43 @@
 
 (defstruct pair-session accessory salt v b shared-key encrypt-key)
 
+(defun pair-setup-begin (acc session)
+  "Claim the single Pair-Setup slot for SESSION.  Returns T if acquired, NIL if
+another connection is already mid-setup (HAP allows only one at a time)."
+  (bordeaux-threads:with-lock-held ((accessory-pairing-lock acc))
+    (cond ((null (accessory-pairing-owner acc))
+           (setf (accessory-pairing-owner acc) session) t)
+          ((eq (accessory-pairing-owner acc) session) t)
+          (t nil))))
+
+(defun pair-setup-end (acc session)
+  "Release the Pair-Setup slot if SESSION holds it (safe to call unconditionally)."
+  (bordeaux-threads:with-lock-held ((accessory-pairing-lock acc))
+    (when (eq (accessory-pairing-owner acc) session)
+      (setf (accessory-pairing-owner acc) nil))))
+
 (defun pair-setup-m2 (session)
-  "Respond to the controller's M1 with M2: State=2, PublicKey=B, Salt=s."
+  "Respond to the controller's M1 with M2: State=2, PublicKey=B, Salt=s — or an
+error if the accessory is already paired, locked out, or busy with another setup."
   (let* ((acc (pair-session-accessory session))
-         (group *hap-srp-group*)
-         (salt (ironclad:random-data 16))
-         (b (bytes->int (ironclad:random-data 32)))
-         (v (srp-verifier group salt "Pair-Setup" (accessory-setup-code acc))))
-    (setf (pair-session-salt session) salt
-          (pair-session-v session) v
-          (pair-session-b session) b)
-    (tlv8-encode (list (cons +tlv-state+ 2)
-                       (cons +tlv-public-key+ (srp-pad group (srp-b-pub group v b)))
-                       (cons +tlv-salt+ salt)))))
+         (group *hap-srp-group*))
+    (cond
+      ((accessory-paired acc)                       ; already paired -> use AddPairing
+       (error-tlv 2 +tlv-error-unavailable+))
+      ((>= (accessory-pair-attempts acc) *max-pair-attempts*)
+       (error-tlv 2 +tlv-error-max-tries+))
+      ((not (pair-setup-begin acc session))
+       (error-tlv 2 +tlv-error-busy+))
+      (t
+       (let* ((salt (ironclad:random-data 16))
+              (b (bytes->int (ironclad:random-data 32)))
+              (v (srp-verifier group salt "Pair-Setup" (accessory-setup-code acc))))
+         (setf (pair-session-salt session) salt
+               (pair-session-v session) v
+               (pair-session-b session) b)
+         (tlv8-encode (list (cons +tlv-state+ 2)
+                            (cons +tlv-public-key+ (srp-pad group (srp-b-pub group v b)))
+                            (cons +tlv-salt+ salt))))))))
 
 (defun pair-setup-m4 (session m3-tlv)
   "Verify the controller's SRP proof (M3) and respond with M4 (server proof) — or
@@ -67,15 +102,23 @@ an authentication error if the setup code was wrong."
          (secret (srp-server-secret group b a-pub v))
          (k (srp-session-key group secret))
          (b-pub (srp-b-pub group v b))
-         (expected (srp-m1 group "Pair-Setup" salt a-pub b-pub k)))
+         (expected (srp-m1 group "Pair-Setup" salt a-pub b-pub k))
+         (acc (pair-session-accessory session)))
     (cond
-      ((equalp client-proof expected)
+      ((ct-equal client-proof expected)          ; constant-time, like the AEAD tag
        (setf (pair-session-shared-key session) k
              (pair-session-encrypt-key session)
              (hkdf-key +ps-encrypt-salt+ k +ps-encrypt-info+))
        (tlv8-encode (list (cons +tlv-state+ 4)
                           (cons +tlv-proof+ (srp-m2 group a-pub expected k)))))
-      (t (error-tlv 4 +tlv-error-authentication+)))))
+      (t
+       ;; wrong setup code: count it, free the setup slot so a retry can begin,
+       ;; and lock out once the cap is hit.
+       (incf (accessory-pair-attempts acc))
+       (pair-setup-end acc session)
+       (error-tlv 4 (if (>= (accessory-pair-attempts acc) *max-pair-attempts*)
+                        +tlv-error-max-tries+
+                        +tlv-error-authentication+))))))
 
 (defun pair-setup-m6 (session m5-tlv)
   "Decrypt the controller's device info (M5), verify its signature, store its
@@ -97,10 +140,16 @@ LTPK, and respond with the accessory's signed device info (M6)."
            (ios-x (hkdf-key +ps-controller-sign-salt+ k +ps-controller-sign-info+))
            (ios-info (cat ios-x ios-id ios-ltpk)))
       (unless (ed25519-verify ios-ltpk ios-info ios-sig)
+        (incf (accessory-pair-attempts acc))
+        (pair-setup-end acc session)
         (return-from pair-setup-m6 (error-tlv 6 +tlv-error-authentication+)))
-      ;; Controller authenticated — remember it.
-      (setf (gethash (octets->string ios-id) (accessory-paired-controllers acc)) ios-ltpk
-            (accessory-paired acc) t)
+      ;; Controller authenticated — remember it as the first (admin) pairing.
+      (let ((id (octets->string ios-id)))
+        (setf (gethash id (accessory-paired-controllers acc)) ios-ltpk
+              (gethash id (accessory-paired-permissions acc)) t   ; first pairing is admin
+              (accessory-paired acc) t))
+      (pair-setup-end acc session)
+      (maybe-persist acc)
       ;; Accessory's own signed device info, encrypted back.
       (let* ((acc-x (hkdf-key +ps-accessory-sign-salt+ k +ps-accessory-sign-info+))
              (acc-id (s->octets (accessory-id acc)))
@@ -114,6 +163,72 @@ LTPK, and respond with the accessory's signed device info (M6)."
             (chacha20-poly1305-encrypt ekey (ps-nonce "PS-Msg06") nil sub-tlv)
           (tlv8-encode (list (cons +tlv-state+ 6)
                              (cons +tlv-encrypted-data+ (cat ct tag)))))))))
+
+;;; ==========================================================================
+;;; Pairings — add / remove / list additional controllers (HAP §5.10-5.12)
+;;; These run over the *encrypted* session; only an admin controller may use them.
+;;; ==========================================================================
+
+(defun accessory-controller-admin-p (acc id)
+  "Is the controller with pairing id ID an admin on ACC?"
+  (and id (gethash id (accessory-paired-permissions acc))))
+
+(defun ps-add-pairing (acc admin items)
+  "AddPairing (HAP §5.10): store an additional controller's id + LTPK + permission."
+  (unless admin (return-from ps-add-pairing (error-tlv 2 +tlv-error-authentication+)))
+  (let* ((id (octets->string (tlv8-get items +tlv-identifier+)))
+         (ltpk (tlv8-get items +tlv-public-key+))
+         (perm (tlv8-get-integer items +tlv-permissions+))
+         (existing (gethash id (accessory-paired-controllers acc))))
+    (cond
+      ((and existing (not (equalp existing ltpk)))     ; id reused with a different key
+       (error-tlv 2 +tlv-error-unknown+))
+      (t (setf (gethash id (accessory-paired-controllers acc)) ltpk
+               (gethash id (accessory-paired-permissions acc)) (eql perm 1))
+         (maybe-persist acc)
+         (tlv8-encode (list (cons +tlv-state+ 2)))))))
+
+(defun ps-remove-pairing (acc admin items)
+  "RemovePairing (HAP §5.11): forget a controller.  Idempotent; when the last
+pairing goes the accessory reverts to unpaired."
+  (unless admin (return-from ps-remove-pairing (error-tlv 2 +tlv-error-authentication+)))
+  (let ((id (octets->string (tlv8-get items +tlv-identifier+))))
+    (remhash id (accessory-paired-controllers acc))
+    (remhash id (accessory-paired-permissions acc))
+    (when (zerop (hash-table-count (accessory-paired-controllers acc)))
+      (setf (accessory-paired acc) nil))
+    (maybe-persist acc)
+    (tlv8-encode (list (cons +tlv-state+ 2)))))
+
+(defun ps-list-pairings (acc admin)
+  "ListPairings (HAP §5.12): every controller's id, LTPK, and permission, the
+entries separated by a Separator TLV."
+  (unless admin (return-from ps-list-pairings (error-tlv 2 +tlv-error-authentication+)))
+  (let ((out (list (cons +tlv-state+ 2)))
+        (first t))
+    (maphash (lambda (id ltpk)
+               (unless first
+                 (setf out (append out (list (cons +tlv-separator+
+                                                   (make-array 0 :element-type '(unsigned-byte 8)))))))
+               (setf first nil)
+               (setf out (append out (list (cons +tlv-identifier+ (s->octets id))
+                                           (cons +tlv-public-key+ ltpk)
+                                           (cons +tlv-permissions+
+                                                 (if (gethash id (accessory-paired-permissions acc)) 1 0))))))
+             (accessory-paired-controllers acc))
+    (tlv8-encode out)))
+
+(defun dispatch-pairings (acc controller-id body)
+  "Route a decrypted /pairings request by its Method.  CONTROLLER-ID identifies the
+verified controller on this connection (for the admin check)."
+  (let* ((items (tlv8-decode body))
+         (method (tlv8-get-integer items +tlv-method+))
+         (admin (accessory-controller-admin-p acc controller-id)))
+    (cond
+      ((eql method +pairing-method-add+)    (ps-add-pairing acc admin items))
+      ((eql method +pairing-method-remove+) (ps-remove-pairing acc admin items))
+      ((eql method +pairing-method-list+)   (ps-list-pairings acc admin))
+      (t (error-tlv 2 +tlv-error-authentication+)))))
 
 ;;; ==========================================================================
 ;;; Controller side (SRP client) — for the initiator role and for testing

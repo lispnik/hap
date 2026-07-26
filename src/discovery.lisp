@@ -17,6 +17,23 @@
         (b (ironclad:random-data 4)))
     (map 'string (lambda (x) (char alphabet (mod x 36))) b)))
 
+(defparameter +invalid-setup-codes+
+  '("000-00-000" "111-11-111" "222-22-222" "333-33-333" "444-44-444"
+    "555-55-555" "666-66-666" "777-77-777" "888-88-888" "999-99-999"
+    "123-45-678" "876-54-321")
+  "Setup codes HAP forbids (all-same-digit and the two obvious sequences).")
+
+(defun random-setup-code ()
+  "A random HAP setup code formatted DDD-DD-DDD, avoiding the disallowed codes.
+A per-accessory random code (not a fixed default) is what a real accessory must
+present to the user for pairing."
+  (loop for d = (map 'list (lambda (b) (digit-char (mod b 10))) (ironclad:random-data 8))
+        for code = (format nil "~C~C~C-~C~C-~C~C~C"
+                           (nth 0 d) (nth 1 d) (nth 2 d) (nth 3 d)
+                           (nth 4 d) (nth 5 d) (nth 6 d) (nth 7 d))
+        unless (member code +invalid-setup-codes+ :test #'string=)
+          return code))
+
 (defun base64-encode (bytes)
   "Standard base64 (with padding)."
   (let ((chars "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
@@ -47,14 +64,21 @@
   (category 2)                     ; HAP accessory category (2 = bridge; 5 = lightbulb …)
   (config-number 1)               ; c# — bump when the accessory database changes
   (state-number 1)                ; s#
-  (setup-code "111-22-333")       ; the 8-digit code (used at pairing, M2)
+  (setup-code (random-setup-code)) ; the 8-digit code (used at pairing, M2)
   (setup-id (random-setup-id))
   (port 51826)                    ; HAP TCP port
   (paired nil)
   seed public                      ; Ed25519 long-term identity (raw octets)
   (paired-controllers (make-hash-table :test 'equal))  ; pairingID -> controller LTPK
+  (paired-permissions (make-hash-table :test 'equal))  ; pairingID -> admin-p
   (aid 1)                          ; this accessory's aid in its own database
   (services '())                   ; list of HAP-SERVICE (the accessory model, M4)
+  ;; Pair-Setup guarding (HAP §5.6): one attempt at a time, with a wrong-code cap.
+  (pairing-lock (bordeaux-threads:make-lock "hap-pairing"))
+  (pairing-owner nil)              ; the PAIR-SESSION currently running Pair-Setup
+  (pair-attempts 0)                ; failed setup-code attempts (for lockout)
+  (on-identify nil)                ; optional (lambda ()) run on POST /identify
+  (store-path nil)                 ; when set, auto-persist on pair/unpair
   responder service-info)          ; live 0conf state
 
 (defun make-hap-accessory (&rest args)

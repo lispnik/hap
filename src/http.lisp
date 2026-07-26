@@ -33,9 +33,15 @@
   (cdr (assoc name headers :test #'string-equal)))
 
 (defun read-http-body (stream headers)
-  (let ((len (let ((cl (header-value headers "Content-Length"))) (if cl (parse-integer cl) 0))))
+  (let ((len (let ((cl (header-value headers "Content-Length")))
+               (or (and cl (parse-integer cl :junk-allowed t)) 0))))
     (let ((body (make-array len :element-type '(unsigned-byte 8))))
-      (when (plusp len) (read-sequence body stream))
+      (when (plusp len)
+        (let ((got (read-sequence body stream)))
+          (unless (= got len)
+            ;; a truncated/closed connection must not masquerade as a
+            ;; zero-padded body — fail loudly so the caller drops the message.
+            (error "short HTTP body: Content-Length ~D but only ~D bytes read" len got))))
       body)))
 
 (defun read-http-request (stream)
