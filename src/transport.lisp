@@ -76,14 +76,23 @@ SECURE-STREAM, over which the /accessories and /characteristics traffic flows."
       (ignore-errors (sb-bsd-sockets:socket-close conn)))))
 
 (defun accept-loop (server)
-  (loop while (hap-server-running server)
-        do (handler-case
-               (let ((conn (sb-bsd-sockets:socket-accept (hap-server-socket server))))
-                 (when conn
-                   (bordeaux-threads:make-thread
-                    (lambda () (ignore-errors (handle-connection (hap-server-accessory server) conn)))
-                    :name "hap-conn")))
-             (error () (return)))))          ; listen socket closed -> exit
+  "Accept connections until the server stops.  The listen socket is non-blocking
+and polled, rather than blocking in accept(): on Linux, closing a socket does NOT
+wake an accept() blocked in another thread, so a blocking accept would hang the
+join in STOP-ACCESSORY (macOS/BSD wake it, which is why this only bites on Linux)."
+  (let ((socket (hap-server-socket server)))
+    (setf (sb-bsd-sockets:non-blocking-mode socket) t)
+    (loop while (hap-server-running server)
+          do (let ((conn (ignore-errors (sb-bsd-sockets:socket-accept socket))))
+               (cond
+                 (conn
+                  ;; a BSD-accepted socket inherits non-blocking mode; force it
+                  ;; back to blocking so the per-connection reads work everywhere
+                  (setf (sb-bsd-sockets:non-blocking-mode conn) nil)
+                  (bordeaux-threads:make-thread
+                   (lambda () (ignore-errors (handle-connection (hap-server-accessory server) conn)))
+                   :name "hap-conn"))
+                 (t (sleep 0.02)))))))          ; nothing pending -> yield briefly
 
 (defun serve-accessory (acc)
   "Start a TCP server for ACC on its port (0 = ephemeral).  Returns a HAP-SERVER;
@@ -101,11 +110,13 @@ its PORT slot is the actually-bound port.  Stop it with STOP-ACCESSORY."
       server)))
 
 (defun stop-accessory (server)
+  ;; Clear the flag and join first: the polling accept loop exits within one poll
+  ;; interval on its own, so the join never blocks.  THEN close the socket.
   (setf (hap-server-running server) nil)
-  (ignore-errors (sb-bsd-sockets:socket-close (hap-server-socket server)))
   (let ((th (hap-server-thread server)))
     (when (and th (bordeaux-threads:thread-alive-p th))
       (ignore-errors (bordeaux-threads:join-thread th))))
+  (ignore-errors (sb-bsd-sockets:socket-close (hap-server-socket server)))
   server)
 
 ;;; --- controller (client) ---------------------------------------------------

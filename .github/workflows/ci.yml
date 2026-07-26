@@ -17,6 +17,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15          # a hung loopback test must fail fast, not burn an hour
     steps:
       - uses: actions/checkout@v4
 
