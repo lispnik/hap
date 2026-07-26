@@ -1,6 +1,6 @@
 # cl-hap
 
-[![CI](https://github.com/lispnik/cl-hap/actions/workflows/ci.yml/badge.svg)](https://github.com/lispnik/cl-hap/actions/workflows/ci.yml)
+[![CI](https://github.com/lispnik/hap/actions/workflows/ci.yml/badge.svg)](https://github.com/lispnik/hap/actions/workflows/ci.yml)
 
 A pure Common Lisp implementation of Apple's **HomeKit Accessory Protocol**
 (HAP, the R2 non-commercial spec) over IP — both the **accessory** and
