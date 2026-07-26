@@ -106,6 +106,8 @@ buffers and tests.)"
 (defmethod sb-gray:stream-write-byte ((s secure-stream) byte)
   (vector-push-extend byte (slot-value s 'outbuf)) byte)
 
+(defmethod stream-element-type ((s secure-stream)) '(unsigned-byte 8))
+
 (defmethod sb-gray:stream-force-output ((s secure-stream)) (ss-flush s))
 (defmethod sb-gray:stream-finish-output ((s secure-stream)) (ss-flush s))
 

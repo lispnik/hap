@@ -45,3 +45,52 @@ transport, and the full six-message protocol together, with no multicast."
                             (hap::controller-session-accessory-id cs))))
           (stop-accessory server)))
     (error (e) (skip "loopback TCP pairing unavailable: ~A" e))))
+
+(test control-over-encrypted-session-loopback
+  "The capstone: a Lisp controller pairs, runs Pair-Verify, then over the resulting
+ChaCha20-Poly1305 session reads /accessories and toggles the Lightbulb's On
+characteristic — flipping a real server-side 'light' — and reads it back."
+  (handler-case
+      (let* ((code "314-15-926")
+             (acc (make-hap-accessory :name "Loopback Light" :category 5
+                                      :setup-code code :port 0))
+             (light nil))
+        (ensure-accessory-information acc)
+        (let ((on (add-lightbulb acc :name "Loopback Light"
+                                 :on-write (lambda (v) (setf light v))))
+              (server (serve-accessory acc))
+              (ctrl (make-hap-controller)))
+          (unwind-protect
+               (let ((cs (pair-with-accessory ctrl "127.0.0.1" (hap-server-port server) code)))
+                 (multiple-value-bind (socket stream)
+                     (verify-with-accessory ctrl cs "127.0.0.1" (hap-server-port server))
+                   (unwind-protect
+                        (let ((iid (hap::hap-char-iid on)))
+                          ;; read the accessory database over the encrypted channel
+                          (multiple-value-bind (body status) (hap-get stream "/accessories")
+                            (is (eql 200 status))
+                            (let* ((db (com.inuoe.jzon:parse (hap::octets->string body)))
+                                   (svcs (gethash "services" (aref (gethash "accessories" db) 0))))
+                              (is (find "43" svcs :key (lambda (s) (gethash "type" s))
+                                                  :test #'string=))))
+                          (is (null light))            ; starts off
+                          ;; toggle it on over the encrypted session
+                          (multiple-value-bind (body status)
+                              (hap-put stream "/characteristics"
+                                       (hap::s->octets
+                                        (format nil "{\"characteristics\":[{\"aid\":1,\"iid\":~D,\"value\":true}]}" iid)))
+                            (declare (ignore body))
+                            (is (eql 204 status)))
+                          (is (eq t light))            ; server-side light really flipped
+                          (is (eq t (hap::hap-char-value on)))
+                          ;; read the characteristic back
+                          (multiple-value-bind (body status)
+                              (hap-get stream (format nil "/characteristics?id=1.~D" iid))
+                            (is (eql 200 status))
+                            (let ((c (aref (gethash "characteristics"
+                                                    (com.inuoe.jzon:parse (hap::octets->string body)))
+                                           0)))
+                              (is (eq t (gethash "value" c))))))
+                     (ignore-errors (sb-bsd-sockets:socket-close socket)))))
+            (stop-accessory server))))
+    (error (e) (skip "loopback encrypted control unavailable: ~A" e))))

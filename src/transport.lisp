@@ -24,18 +24,40 @@
       (5 (pair-setup-m6 session body))
       (t (error-tlv (if state (1+ state) 2) +tlv-error-authentication+)))))
 
+(defun dispatch-pair-verify (verify body)
+  "Route a /pair-verify request (by its TLV State) through Pair-Verify."
+  (let ((state (tlv8-get-integer (tlv8-decode body) +tlv-state+)))
+    (case state
+      (1 (pair-verify-m2 verify body))
+      (3 (pair-verify-m4 verify body))
+      (t (error-tlv (if state (1+ state) 2) +tlv-error-authentication+)))))
+
 (defun handle-connection (acc conn)
-  (let ((stream (socket-stream conn))
-        (session (make-pair-session :accessory acc)))
+  "Serve one persistent connection.  Pair-Setup and Pair-Verify run in plaintext;
+once Pair-Verify establishes a session the connection switches to the encrypted
+SECURE-STREAM, over which the /accessories and /characteristics traffic flows."
+  (let ((raw (socket-stream conn))
+        (pair-session (make-pair-session :accessory acc))
+        (verify (make-verify-session :accessory acc))
+        (secure nil))
     (unwind-protect
          (loop
-           (multiple-value-bind (method path body) (read-http-request stream)
+           (multiple-value-bind (method path body)
+               (read-http-request (or secure raw))
              (when (null method) (return))            ; connection closed
-             (let ((response
-                     (cond ((and (string= method "POST") (string= path "/pair-setup"))
-                            (dispatch-pair-setup session body))
-                           (t (error-tlv 2 +tlv-error-authentication+)))))
-               (write-http-response stream response))))
+             (cond
+               ;; pairing traffic — plaintext, TLV8
+               ((string= path "/pair-setup")
+                (write-http-response raw (dispatch-pair-setup pair-session body)))
+               ((eql 0 (search "/pair-verify" path))
+                (write-http-response raw (dispatch-pair-verify verify body))
+                (when (and (verify-session-session verify) (not secure))
+                  (setf secure (make-secure-stream raw (verify-session-session verify)))))
+               ;; the accessory model — only over the encrypted session
+               (secure
+                (write-reply secure (handle-accessory-request acc method path body)))
+               (t (write-reply raw (make-reply "470 Connection Authorization Required"
+                                               nil nil))))))
       (ignore-errors (sb-bsd-sockets:socket-close conn)))))
 
 (defun accept-loop (server)
@@ -91,3 +113,35 @@ learned accessory identity + LTPK); signals on rejection."
                (pair-setup-controller-finish cs m6)
                cs))
         (ignore-errors (sb-bsd-sockets:socket-close socket))))))
+
+(defun verify-with-accessory (controller cs host port)
+  "Open a fresh connection to HOST:PORT and run Pair-Verify as CONTROLLER, using the
+identity in the CONTROLLER-SESSION CS from a prior Pair-Setup.  On success returns
+(values socket secure-stream): plaintext HAP requests written to the stream are
+transparently ChaCha20-Poly1305-encrypted.  Caller closes the socket when done."
+  (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (sb-bsd-sockets:socket-connect socket (0conf:parse-ipv4 host) port)
+    (let* ((raw (socket-stream socket))
+           (vc (make-verify-controller
+                :controller controller
+                :accessory-ltpk (controller-session-accessory-ltpk cs))))
+      (flet ((exchange (tlv)
+               (write-http-post raw "/pair-verify" tlv)
+               (read-http-response raw)))
+        (let* ((m2 (exchange (pair-verify-controller-m1 vc)))
+               (m4 (exchange (pair-verify-controller-m3 vc m2))))
+          (pair-verify-controller-finish vc m4)
+          (unless (verify-controller-session vc)
+            (ignore-errors (sb-bsd-sockets:socket-close socket))
+            (error "Pair-Verify failed: accessory rejected the controller"))
+          (values socket (make-secure-stream raw (verify-controller-session vc))))))))
+
+(defun hap-get (stream path)
+  "GET PATH over the (encrypted) STREAM.  Returns (values body-octets status-code)."
+  (write-http-get stream path)
+  (read-http-response stream))
+
+(defun hap-put (stream path json-octets)
+  "PUT JSON-OCTETS to PATH over STREAM.  Returns (values body-octets status-code)."
+  (write-http-put stream path json-octets)
+  (read-http-response stream))

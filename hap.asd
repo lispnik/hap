@@ -7,7 +7,8 @@
   :author "Matthew Kennedy"
   :license "MIT"
   :version "0.0.1"
-  :depends-on ("0conf" "ironclad" "alexandria" "nibbles" "bordeaux-threads")
+  :depends-on ("0conf" "ironclad" "alexandria" "nibbles" "bordeaux-threads"
+               "com.inuoe.jzon")
   :serial t
   :pathname "src"
   :components ((:file "package")
@@ -17,6 +18,7 @@
                (:file "srp")
                (:file "pairing")
                (:file "secure")
+               (:file "model")
                (:file "store")
                (:file "http")
                (:file "transport"))
@@ -34,6 +36,7 @@
                (:file "srp-tests")
                (:file "pairing-tests")
                (:file "secure-tests")
+               (:file "model-tests")
                (:file "transport-tests"))
   :perform (test-op (o c)
              (uiop:symbol-call :hap/test '#:run-tests)))

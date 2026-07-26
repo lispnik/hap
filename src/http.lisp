@@ -47,10 +47,13 @@
         (values (first parts) (second parts) (read-http-body stream headers))))))
 
 (defun read-http-response (stream)
-  "Read a response; returns its TLV8 body octets."
-  (let ((status (read-crlf-line stream)))
-    (declare (ignore status))
-    (read-http-body stream (read-http-headers stream))))
+  "Read a response.  Returns (values body-octets status-code)."
+  (let* ((status-line (read-crlf-line stream))
+         (code (when status-line
+                 (let ((parts (uiop:split-string status-line :separator '(#\Space))))
+                   (ignore-errors (parse-integer (second parts))))))
+         (body (read-http-body stream (read-http-headers stream))))
+    (values body code)))
 
 (defun write-http (stream start-line body)
   "Write START-LINE + the pairing+tlv8 headers + BODY."
@@ -68,3 +71,51 @@
 
 (defun write-http-post (stream path body)
   (write-http stream (format nil "POST ~A HTTP/1.1" path) body))
+
+;;; --- generic replies (M4: JSON accessory/characteristic traffic) -----------
+
+(defstruct (reply (:constructor make-reply (status content-type body)))
+  "A ready-to-send HTTP response: STATUS (\"200 OK\"), CONTENT-TYPE (NIL for none),
+BODY (octets or NIL)."
+  status content-type body)
+
+(defun tlv-reply (body) (make-reply "200 OK" "application/pairing+tlv8" body))
+(defun json-reply (body &optional (status "200 OK"))
+  (make-reply status "application/hap+json" body))
+(defun no-content () (make-reply "204 No Content" nil nil))
+
+(defun write-reply (stream reply)
+  "Write a REPLY struct: status line, optional Content-Type/-Length, optional body."
+  (let ((body (reply-body reply)))
+    (write-sequence
+     (s->octets
+      (if (and body (plusp (length body)))
+          (format nil "HTTP/1.1 ~A~C~CContent-Type: ~A~C~CContent-Length: ~D~C~C~C~C"
+                  (reply-status reply) #\Return #\Newline
+                  (reply-content-type reply) #\Return #\Newline
+                  (length body) #\Return #\Newline #\Return #\Newline)
+          (format nil "HTTP/1.1 ~A~C~CContent-Length: 0~C~C~C~C"
+                  (reply-status reply) #\Return #\Newline
+                  #\Return #\Newline #\Return #\Newline)))
+     stream)
+    (when (and body (plusp (length body))) (write-sequence body stream))
+    (finish-output stream)))
+
+(defun write-http-get (stream path)
+  "Write a bodyless GET request."
+  (write-sequence
+   (s->octets (format nil "GET ~A HTTP/1.1~C~CContent-Length: 0~C~C~C~C"
+                      path #\Return #\Newline #\Return #\Newline #\Return #\Newline))
+   stream)
+  (finish-output stream))
+
+(defun write-http-put (stream path body)
+  "Write a PUT request carrying a hap+json BODY."
+  (write-sequence
+   (s->octets (format nil "PUT ~A HTTP/1.1~C~CContent-Type: application/hap+json~C~C~
+                           Content-Length: ~D~C~C~C~C"
+                      path #\Return #\Newline #\Return #\Newline
+                      (length body) #\Return #\Newline #\Return #\Newline))
+   stream)
+  (write-sequence body stream)
+  (finish-output stream))
