@@ -1,0 +1,212 @@
+#+TITLE: cl-hap — a literate tour
+#+PROPERTY: header-args:lisp :tangle tutorial.lisp :results silent
+
+This is a tangle-able walkthrough of ~cl-hap~, the pure Common Lisp implementation
+of Apple's HomeKit Accessory Protocol. Every source block below tangles into
+=doc/tutorial.lisp=; loading that file runs the whole tour and *asserts* its own
+results, so CI can prove the prose stays true.
+
+To run it yourself:
+
+#+begin_src sh :tangle no
+emacs --batch --eval "(require 'org)" \
+      --eval '(org-babel-tangle-file "doc/tutorial.org")'
+sbcl --non-interactive --load doc/tutorial.lisp
+#+end_src
+
+* Loading
+
+We work inside the ~hap~ package so the internal state-machine functions (the
+Pair-Setup/Pair-Verify message builders) are in reach — a real application only
+needs the exported high-level API.
+
+#+begin_src lisp
+(require :asdf)
+(asdf:load-system :hap)
+(in-package :hap)
+
+(defmacro check (form) `(assert ,form () "tutorial check failed: ~S" ',form))
+#+end_src
+
+* TLV8 — the wire format for pairing
+
+Every pairing message is a list of type/length/value items. Values longer than
+255 bytes are split into consecutive same-type fragments and reassembled
+transparently — essential, since the 3072-bit SRP keys are 384 bytes.
+
+#+begin_src lisp
+(let* ((items (list (cons +tlv-state+ 1)
+                    (cons +tlv-identifier+ (s->octets "AA:BB:CC:DD:EE:FF"))
+                    (cons +tlv-public-key+ (ironclad:random-data 384)))) ; > 255 -> fragmented
+       (decoded (tlv8-decode (tlv8-encode items))))
+  (check (= 1 (tlv8-get-integer decoded +tlv-state+)))
+  (check (= 384 (length (tlv8-get decoded +tlv-public-key+)))))
+#+end_src
+
+* Building an accessory
+
+An accessory is a bundle of *services*, each a bundle of *characteristics*. The
+=define-accessory= DSL wires up the mandatory Accessory Information + Protocol
+Information services and whatever functional services you list.
+
+#+begin_src lisp
+(defparameter *light* (make-hap-accessory :name "Tutorial Light" :category 5
+                                          :setup-code "111-22-333"))
+(ensure-accessory-information *light*)
+(defparameter *on* (add-lightbulb *light* :name "Desk Lamp"))
+
+;; the model serialises to the HAP /accessories JSON a controller reads
+(let* ((db (com.inuoe.jzon:parse (octets->string (accessories-json *light*))))
+       (types (map 'list (lambda (s) (gethash "type" s))
+                   (gethash "services" (aref (gethash "accessories" db) 0)))))
+  (check (member "3E" types :test #'string=))    ; Accessory Information
+  (check (member "A2" types :test #'string=))    ; Protocol Information
+  (check (member "43" types :test #'string=)))   ; Lightbulb
+#+end_src
+
+The DSL form is equivalent and handy for larger accessories:
+
+#+begin_src lisp
+(defparameter *desk*
+  (define-accessory (:name "Desk" :category 5 :setup-code "111-22-333")
+    (:lightbulb :name "Lamp")
+    (:switch    :name "Fan")
+    (:motion-sensor)))
+(check (= 5 (length (accessory-services *desk*))))   ; 2 mandatory + 3 functional
+#+end_src
+
+* Pair-Setup — proving knowledge of the setup code
+
+Pair-Setup is a six-message SRP-6a exchange: the controller proves it knows the
+8-digit code without sending it, then the two sides exchange and sign their
+long-term Ed25519 identities. We drive both roles in-process.
+
+#+begin_src lisp
+(defun run-pair-setup (acc ctrl code)
+  (let ((as (make-pair-session :accessory acc))
+        (cs (make-controller-session :controller ctrl :setup-code code)))
+    (pair-setup-controller-finish
+     cs (pair-setup-m6 as (pair-setup-controller-m5
+                           cs (pair-setup-m4 as (pair-setup-controller-m3
+                                                 cs (pair-setup-m2 as))))))
+    cs))
+
+(defparameter *controller* (make-hap-controller))
+(defparameter *cs* (run-pair-setup *light* *controller* "111-22-333"))
+
+(check (accessory-paired *light*))
+;; the accessory stored the controller's long-term public key, as an admin
+(check (equalp (controller-public *controller*)
+               (gethash (controller-pairing-id *controller*)
+                        (accessory-paired-controllers *light*))))
+(check (accessory-controller-admin-p *light* (controller-pairing-id *controller*)))
+#+end_src
+
+A wrong code is rejected, counted toward the lockout, and never records a pairing:
+
+#+begin_src lisp
+(let* ((acc (make-hap-accessory :setup-code "111-11-111"))
+       (ctrl (make-hap-controller))
+       (as (make-pair-session :accessory acc))
+       (cs (make-controller-session :controller ctrl :setup-code "999-99-999"))
+       (m4 (pair-setup-m4 as (pair-setup-controller-m3 cs (pair-setup-m2 as)))))
+  (check (= +tlv-error-authentication+ (tlv8-get-integer (tlv8-decode m4) +tlv-error+)))
+  (check (= 1 (accessory-pair-attempts acc)))
+  (check (not (accessory-paired acc))))
+#+end_src
+
+* Pair-Verify — a fresh encrypted session each connection
+
+After pairing, every connection runs Pair-Verify: an ephemeral X25519 exchange,
+each side signing its ephemeral key with its long-term Ed25519 identity. The
+result is a pair of directional ChaCha20-Poly1305 keys.
+
+#+begin_src lisp
+(defun run-pair-verify (acc ctrl cs)
+  (let ((vs (make-verify-session :accessory acc))
+        (vc (make-verify-controller :controller ctrl
+                                    :accessory-ltpk (controller-session-accessory-ltpk cs))))
+    (pair-verify-controller-finish
+     vc (pair-verify-m4 vs (pair-verify-controller-m3
+                            vc (pair-verify-m2 vs (pair-verify-controller-m1 vc)))))
+    (values vs vc)))
+
+(multiple-value-bind (vs vc) (run-pair-verify *light* *controller* *cs*)
+  (let ((a (verify-session-session vs))
+        (c (verify-controller-session vc)))
+    ;; the two directions cross-match: what the accessory writes, the controller reads
+    (check (equalp (hap-session-read-key a) (hap-session-write-key c)))
+    (check (equalp (hap-session-write-key a) (hap-session-read-key c)))
+    ;; and a framed message round-trips through the session codec
+    (let ((msg (s->octets "hello over the encrypted channel")))
+      (check (equalp msg (session-decrypt c (session-encrypt a msg)))))))
+#+end_src
+
+* Reading and writing characteristics
+
+Over the session a controller reads =/accessories=, then reads/writes individual
+characteristics. Writing the Lightbulb's On characteristic flips the real
+server-side value (and would fire an on-write callback):
+
+#+begin_src lisp
+(let ((iid (hap-char-iid *on*)))
+  (check (null (hap-char-value *on*)))            ; starts off
+  (handle-put-characteristics
+   *light* (s->octets (format nil "{\"characteristics\":[{\"aid\":1,\"iid\":~D,\"value\":true}]}" iid)))
+  (check (eq t (hap-char-value *on*)))            ; now on
+  ;; reading it back through the GET handler
+  (let* ((reply (handle-get-characteristics *light* (format nil "/characteristics?id=1.~D" iid)))
+         (c (aref (gethash "characteristics"
+                           (com.inuoe.jzon:parse (octets->string (reply-body reply)))) 0)))
+    (check (eq t (gethash "value" c)))))
+#+end_src
+
+Writing a read-only characteristic is refused:
+
+#+begin_src lisp
+(let ((reply (handle-put-characteristics
+              *light* (s->octets "{\"characteristics\":[{\"aid\":1,\"iid\":4,\"value\":\"x\"}]}"))))
+  (check (not (string= "204 No Content" (reply-status reply)))))
+#+end_src
+
+* Events — the accessory pushing its own changes
+
+When an accessory's state changes on its own (a sensor reading, a physical
+button), =update-characteristic= sets the value and pushes an EVENT to every
+subscribed connection. Here we just observe the value change:
+
+#+begin_src lisp
+(update-characteristic *light* *on* nil)
+(check (null (hap-char-value *on*)))
+#+end_src
+
+* Bridges — many accessories behind one connection
+
+A bridge exposes several accessories, each with its own aid, over a single
+connection — the pattern for a hub speaking to many devices.
+
+#+begin_src lisp
+(defparameter *bridge* (make-hap-accessory :name "Tutorial Bridge" :category 2))
+(ensure-accessory-information *bridge*)
+(defparameter *lamp*  (make-hap-accessory :name "Lamp"))
+(defparameter *fan*   (make-hap-accessory :name "Fan"))
+(defparameter *lamp-on* (add-lightbulb *lamp*))
+(add-switch *fan*)
+(add-bridged-accessory *bridge* *lamp*)
+(add-bridged-accessory *bridge* *fan*)
+
+;; three accessories in the database, aids 1/2/3
+(check (equal '(1 2 3) (sort (mapcar #'accessory-aid (accessory-database *bridge*)) #'<)))
+;; a characteristic routes to the right child by aid
+(check (eq *lamp-on* (db-find-characteristic *bridge* 2 (hap-char-iid *lamp-on*))))
+#+end_src
+
+* Done
+
+#+begin_src lisp
+(format t "~&cl-hap tutorial: all checks passed.~%")
+#+end_src
+
+If you loaded this file and reached this line without an assertion error, the
+whole pipeline — TLV8, the model, Pair-Setup, Pair-Verify, the encrypted session,
+characteristics, events, and bridging — works end to end.

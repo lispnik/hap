@@ -42,6 +42,11 @@ admin check on /pairings)."
 (defparameter +svc-protocol-information+ "A2")
 (defparameter +svc-lightbulb+ "43")
 (defparameter +svc-switch+    "49")
+(defparameter +svc-outlet+    "47")
+(defparameter +svc-temperature-sensor+ "8A")
+(defparameter +svc-humidity-sensor+    "82")
+(defparameter +svc-contact-sensor+     "80")
+(defparameter +svc-motion-sensor+      "85")
 (defparameter +char-identify+ "14")
 (defparameter +char-manufacturer+ "20")
 (defparameter +char-model+    "21")
@@ -50,6 +55,11 @@ admin check on /pairings)."
 (defparameter +char-firmware+ "52")
 (defparameter +char-version+  "37")
 (defparameter +char-on+       "25")
+(defparameter +char-outlet-in-use+ "26")
+(defparameter +char-current-temperature+ "11")
+(defparameter +char-current-humidity+    "10")
+(defparameter +char-contact-state+       "6A")
+(defparameter +char-motion-detected+     "22")
 
 (defun accessory-information-service (acc &key (iid 1))
   "The mandatory Accessory Information service (HAP §8.1)."
@@ -63,22 +73,6 @@ admin check on /pairings)."
          (make-hap-char :iid (+ iid 5) :type +char-serial+ :value (accessory-id acc) :perms '("pr") :format "string")
          (make-hap-char :iid (+ iid 6) :type +char-firmware+ :value "1.0" :perms '("pr") :format "string"))))
 
-(defun add-lightbulb (acc &key (name "Lisp Light") (iid 8) on-write)
-  "Give ACC a Lightbulb service (an On characteristic + a Name).  Returns the On
-HAP-CHAR so callers can read/observe it.  ON-WRITE, if given, is (lambda (bool))."
-  (let ((on (make-hap-char :iid (+ iid 1) :type +char-on+ :value nil
-                           :perms '("pr" "pw" "ev") :format "bool" :on-write on-write)))
-    (setf (accessory-services acc)
-          (append (accessory-services acc)
-                  (list (make-hap-service
-                         :iid iid :type +svc-lightbulb+
-                         :characteristics
-                         (list on
-                               (make-hap-char :iid (+ iid 2) :type +char-name+
-                                              :value name :perms '("pr") :format "string"))))))
-    (note-database-change acc)
-    on))
-
 (defun note-database-change (acc)
   "Call after the accessory database changes.  While the accessory is advertising,
 bump the config number (c#) and re-publish so controllers know to re-read
@@ -90,7 +84,81 @@ at startup doesn't inflate c#."
     (maybe-persist acc))
   acc)
 
-(defun protocol-information-service (&key (iid 100))
+(defun alloc-iids (acc)
+  "Reserve the next block of instance ids for a service, returning its base iid."
+  (prog1 (accessory-iid-counter acc)
+    (incf (accessory-iid-counter acc) 10)))
+
+(defun %add-service (acc svc-type name primary-char &key extra-chars)
+  "Append a service of SVC-TYPE (with a Name characteristic) whose first
+characteristic is PRIMARY-CHAR, and return PRIMARY-CHAR.  Instance ids are
+allocated automatically.  PRIMARY-CHAR and EXTRA-CHARS are HAP-CHARs whose iid
+slots this fills in from the allocated block."
+  (let* ((base (alloc-iids acc))
+         (chars (append (list primary-char) extra-chars))
+         (name-char (make-hap-char :type +char-name+ :value name
+                                   :perms '("pr") :format "string")))
+    ;; assign iids: base = service, base+1.. = characteristics
+    (loop for c in (append chars (list name-char))
+          for i from 1
+          do (setf (hap-char-iid c) (+ base i)))
+    (setf (accessory-services acc)
+          (append (accessory-services acc)
+                  (list (make-hap-service :iid base :type svc-type
+                                          :characteristics (append chars (list name-char))))))
+    (note-database-change acc)
+    primary-char))
+
+(defun add-lightbulb (acc &key (name "Lisp Light") on-write)
+  "Give ACC a Lightbulb service (an On characteristic).  Returns the On HAP-CHAR."
+  (%add-service acc +svc-lightbulb+ name
+                (make-hap-char :type +char-on+ :value nil
+                               :perms '("pr" "pw" "ev") :format "bool" :on-write on-write)))
+
+(defun add-switch (acc &key (name "Lisp Switch") on-write)
+  "Give ACC a Switch service (an On characteristic).  Returns the On HAP-CHAR."
+  (%add-service acc +svc-switch+ name
+                (make-hap-char :type +char-on+ :value nil
+                               :perms '("pr" "pw" "ev") :format "bool" :on-write on-write)))
+
+(defun add-outlet (acc &key (name "Lisp Outlet") on-write)
+  "Give ACC an Outlet service (On + read-only OutletInUse).  Returns the On char."
+  (%add-service acc +svc-outlet+ name
+                (make-hap-char :type +char-on+ :value nil
+                               :perms '("pr" "pw" "ev") :format "bool" :on-write on-write)
+                :extra-chars (list (make-hap-char :type +char-outlet-in-use+ :value nil
+                                                  :perms '("pr" "ev") :format "bool"))))
+
+(defun add-temperature-sensor (acc &key (name "Lisp Temperature"))
+  "Give ACC a Temperature Sensor service.  Returns the CurrentTemperature char
+(0–100 °C); update it with UPDATE-CHARACTERISTIC as readings change."
+  (%add-service acc +svc-temperature-sensor+ name
+                (make-hap-char :type +char-current-temperature+ :value 0.0
+                               :perms '("pr" "ev") :format "float"
+                               :min-value 0.0 :max-value 100.0 :min-step 0.1 :unit "celsius")))
+
+(defun add-humidity-sensor (acc &key (name "Lisp Humidity"))
+  "Give ACC a Humidity Sensor service.  Returns the CurrentRelativeHumidity char."
+  (%add-service acc +svc-humidity-sensor+ name
+                (make-hap-char :type +char-current-humidity+ :value 0.0
+                               :perms '("pr" "ev") :format "float"
+                               :min-value 0.0 :max-value 100.0 :min-step 1.0 :unit "percentage")))
+
+(defun add-contact-sensor (acc &key (name "Lisp Contact"))
+  "Give ACC a Contact Sensor service.  Returns the ContactSensorState char
+(0 = contact detected, 1 = not detected)."
+  (%add-service acc +svc-contact-sensor+ name
+                (make-hap-char :type +char-contact-state+ :value 0
+                               :perms '("pr" "ev") :format "uint8"
+                               :min-value 0 :max-value 1 :min-step 1 :valid-values '(0 1))))
+
+(defun add-motion-sensor (acc &key (name "Lisp Motion"))
+  "Give ACC a Motion Sensor service.  Returns the MotionDetected char."
+  (%add-service acc +svc-motion-sensor+ name
+                (make-hap-char :type +char-motion-detected+ :value nil
+                               :perms '("pr" "ev") :format "bool")))
+
+(defun protocol-information-service (&key (iid 1000))
   "The HAP Protocol Information service (§8.15): a Version characteristic
 advertising the HAP version the accessory speaks."
   (make-hap-service
@@ -109,6 +177,50 @@ and Protocol Information."
                 :key #'hap-service-type :test #'string=)
     (push (accessory-information-service acc) (accessory-services acc)))
   acc)
+
+;;; --- bridges: several accessories behind one connection (HAP §2.5) ---------
+
+(defun accessory-database (root)
+  "The full list of accessories ROOT exposes: itself first (aid 1), then any
+bridged children.  This is what /accessories enumerates."
+  (cons root (accessory-bridged root)))
+
+(defun add-bridged-accessory (bridge child)
+  "Expose CHILD through BRIDGE, assigning it the next aid.  CHILD gets the mandatory
+services if it lacks them.  Returns CHILD."
+  (ensure-accessory-information child)
+  (setf (accessory-aid child)
+        (+ 2 (length (accessory-bridged bridge))))     ; 1 is the bridge itself
+  (setf (accessory-bridged bridge)
+        (append (accessory-bridged bridge) (list child)))
+  (note-database-change bridge)
+  child)
+
+;;; --- declarative construction ----------------------------------------------
+
+(defparameter *service-builders*
+  '((:lightbulb . add-lightbulb) (:switch . add-switch) (:outlet . add-outlet)
+    (:temperature-sensor . add-temperature-sensor) (:humidity-sensor . add-humidity-sensor)
+    (:contact-sensor . add-contact-sensor) (:motion-sensor . add-motion-sensor))
+  "Maps a DEFINE-ACCESSORY service keyword to its add-* builder.")
+
+(defmacro define-accessory ((&rest accessory-args) &body service-forms)
+  "Build and return an accessory declaratively.  ACCESSORY-ARGS go to
+MAKE-HAP-ACCESSORY; each SERVICE-FORM is (:keyword . args) naming a builder in
+*SERVICE-BUILDERS*, e.g.
+
+  (define-accessory (:name \"Desk\" :category 5)
+    (:lightbulb :name \"Lamp\")
+    (:switch :name \"Fan\"))"
+  (let ((acc (gensym "ACC")))
+    `(let ((,acc (make-hap-accessory ,@accessory-args)))
+       (ensure-accessory-information ,acc)
+       ,@(loop for form in service-forms
+               for builder = (cdr (assoc (car form) *service-builders*))
+               do (unless builder
+                    (error "define-accessory: unknown service ~S" (car form)))
+               collect `(,builder ,acc ,@(cdr form)))
+       ,acc)))
 
 ;;; --- characteristic lookup -------------------------------------------------
 
@@ -153,14 +265,16 @@ and Protocol Information."
         "type" (hap-service-type svc)
         "characteristics" (map 'vector #'char->json (hap-service-characteristics svc))))
 
+(defun accessory->json (a)
+  (%obj "aid" (accessory-aid a)
+        "services" (map 'vector #'service->json (accessory-services a))))
+
 (defun accessories-json (acc)
-  "The full /accessories database as HAP+JSON octets."
+  "The full /accessories database (the accessory and any bridged children) as
+HAP+JSON octets."
   (s->octets
    (com.inuoe.jzon:stringify
-    (%obj "accessories"
-          (vector (%obj "aid" (accessory-aid acc)
-                        "services" (map 'vector #'service->json
-                                        (accessory-services acc))))))))
+    (%obj "accessories" (map 'vector #'accessory->json (accessory-database acc))))))
 
 ;;; --- endpoint handlers (called with the *decrypted* request) --------------
 
@@ -181,11 +295,16 @@ Returns a list of (aid . iid)."
                   collect (cons (parse-integer pair :end dot)
                                 (parse-integer pair :start (1+ dot)))))))))
 
+(defun db-find-characteristic (root aid iid)
+  "Find characteristic AID.IID anywhere in ROOT's accessory database."
+  (let ((a (find aid (accessory-database root) :key #'accessory-aid)))
+    (and a (find-characteristic a iid))))
+
 (defun handle-get-characteristics (acc path)
   "GET /characteristics?id=… → 200 hap+json with the requested values."
   (let ((results
           (loop for (aid . iid) in (parse-id-query path)
-                for c = (and (= aid (accessory-aid acc)) (find-characteristic acc iid))
+                for c = (db-find-characteristic acc aid iid)
                 collect (if (and c (char-readable-p c))
                             (%obj "aid" aid "iid" iid "value" (hap-char-value c))
                             (%obj "aid" aid "iid" iid "status" -70402))))) ; unable to read
@@ -197,16 +316,21 @@ Returns a list of (aid . iid)."
 
 (defun handle-put-characteristics (acc body &optional connection)
   "PUT /characteristics — apply each {aid,iid,value} write and each {aid,iid,ev}
-event subscription/unsubscription (needs CONNECTION).  204 on full success."
-  (let* ((req (com.inuoe.jzon:parse (octets->string body)))
-         (chars (gethash "characteristics" req))
+event subscription/unsubscription (needs CONNECTION).  204 on full success, 400 on
+a malformed body."
+  (let ((req (handler-case (com.inuoe.jzon:parse (octets->string body))
+               (error () (return-from handle-put-characteristics
+                           (make-reply "400 Bad Request" nil nil))))))
+   (let ((chars (and (hash-table-p req) (gethash "characteristics" req)))
          (ok t))
+    (unless (and chars (vectorp chars))
+      (return-from handle-put-characteristics (make-reply "400 Bad Request" nil nil)))
     (loop for entry across chars
           for aid = (gethash "aid" entry)
           for iid = (gethash "iid" entry)
           for has-value = (nth-value 1 (gethash "value" entry))
           for has-ev = (nth-value 1 (gethash "ev" entry))
-          for c = (and (eql aid (accessory-aid acc)) (find-characteristic acc iid))
+          for c = (db-find-characteristic acc aid iid)
           do (cond
                ((and c (char-writable-p c) has-value)
                 (let ((v (gethash "value" entry)))
@@ -221,7 +345,7 @@ event subscription/unsubscription (needs CONNECTION).  204 on full success."
                    (unsubscribe-characteristic connection c))))
     (if ok
         (no-content)
-        (json-reply (s->octets "{\"status\":-70404}") "207 Multi-Status"))))
+        (json-reply (s->octets "{\"status\":-70404}") "207 Multi-Status")))))
 
 (defun run-identify (acc)
   "Run the accessory's identify routine (blink an LED, etc.), if it has one."

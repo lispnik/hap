@@ -28,8 +28,12 @@
    #:hap-char-min-value #:hap-char-max-value #:hap-char-min-step
    #:hap-char-unit #:hap-char-valid-values
    #:accessory-information-service #:protocol-information-service
-   #:ensure-accessory-information #:add-lightbulb
-   #:find-characteristic #:update-characteristic #:note-database-change #:run-identify
+   #:ensure-accessory-information
+   #:add-lightbulb #:add-switch #:add-outlet #:add-temperature-sensor
+   #:add-humidity-sensor #:add-contact-sensor #:add-motion-sensor
+   #:define-accessory #:add-bridged-accessory #:accessory-database #:accessory-bridged
+   #:find-characteristic #:db-find-characteristic
+   #:update-characteristic #:note-database-change #:run-identify
    ;; events (server push)
    #:hap-connection #:subscribe-characteristic #:unsubscribe-characteristic
    ;; pairing (controller role)

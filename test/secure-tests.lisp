@@ -141,3 +141,34 @@ reloaded accessory keeps its admin controller and continues persisting there."
              (is (hap::accessory-controller-admin-p back (controller-pairing-id ctrl)))
              (is (string= path (accessory-store-path back)))))
       (ignore-errors (delete-file path)))))
+
+(test session-rejects-corrupted-and-replayed-frames
+  "A frame with a flipped tag byte fails authentication (NIL), and replaying a
+frame fails because the receiver's counter has advanced."
+  (let ((msg (hap::s->octets "sensitive")))
+    ;; corrupt the last byte (inside the Poly1305 tag) -> decrypt returns NIL
+    (let* ((shared (ironclad:random-data 32))
+           (a (hap::make-session-keys shared :accessory))
+           (c (hap::make-session-keys shared :controller))
+           (bad (copy-seq (hap::session-encrypt a msg))))
+      (setf (aref bad (1- (length bad))) (logxor 255 (aref bad (1- (length bad)))))
+      (let ((len (logior (aref bad 0) (ash (aref bad 1) 8))))
+        (is (null (hap::chacha20-poly1305-decrypt
+                   (hap::hap-session-read-key c) (hap::session-nonce 0)
+                   (subseq bad 0 2) (subseq bad 2 (+ 2 len)) (subseq bad (+ 2 len)))))))
+    ;; a good frame decrypts once; replaying it fails (the receiver's counter has moved)
+    (let* ((shared (ironclad:random-data 32))
+           (a (hap::make-session-keys shared :accessory))
+           (c (hap::make-session-keys shared :controller))
+           (framed (hap::session-encrypt a msg)))
+      (is (equalp msg (hap::session-decrypt c framed)))
+      (signals error (hap::session-decrypt c framed)))))
+
+(test dispatch-rejects-unexpected-pair-setup-state
+  "An out-of-sequence Pair-Setup state is answered with an error TLV, not a crash."
+  (let* ((acc (make-hap-accessory :setup-code "111-22-333"))
+         (session (hap::make-pair-session :accessory acc))
+         ;; State=9 is not a real Pair-Setup step
+         (resp (hap::dispatch-pair-setup session
+                 (tlv8-encode (list (cons +tlv-state+ 9))))))
+    (is (integerp (tlv8-get-integer (tlv8-decode resp) +tlv-error+)))))

@@ -73,6 +73,8 @@ present to the user for pairing."
   (paired-permissions (make-hash-table :test 'equal))  ; pairingID -> admin-p
   (aid 1)                          ; this accessory's aid in its own database
   (services '())                   ; list of HAP-SERVICE (the accessory model, M4)
+  (bridged '())                    ; child accessories exposed through this one (bridge)
+  (iid-counter 10)                 ; next free instance-id block for added services
   ;; Pair-Setup guarding (HAP §5.6): one attempt at a time, with a wrong-code cap.
   (pairing-lock (bordeaux-threads:make-lock "hap-pairing"))
   (pairing-owner nil)              ; the PAIR-SESSION currently running Pair-Setup

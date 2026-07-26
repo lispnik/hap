@@ -1,5 +1,7 @@
 # cl-hap
 
+[![CI](https://github.com/lispnik/cl-hap/actions/workflows/ci.yml/badge.svg)](https://github.com/lispnik/cl-hap/actions/workflows/ci.yml)
+
 A pure Common Lisp implementation of Apple's **HomeKit Accessory Protocol**
 (HAP, the R2 non-commercial spec) over IP — both the **accessory** and
 **controller** roles. Discovery is delegated to
@@ -41,10 +43,13 @@ pushes `EVENT` change notifications, manages additional controllers via
 `/pairings` (add/remove/list with admin gating), answers `/identify`, advertises
 the Protocol Information service, bumps `c#` on database changes, and persists
 pairings on change; the controller side pairs, verifies, reads, writes,
-subscribes, discovers, and manages pairings. **413 tests, all green** — including
-a full loopback capstone (a Lisp controller pairs → verifies → reads
-`/accessories` → toggles a Lightbulb → receives the pushed event, all over the
-encrypted channel, no multicast required).
+subscribes, discovers, and manages pairings. A standard-service library
+(lightbulb, switch, outlet, temperature/humidity/contact/motion sensors), a
+`define-accessory` DSL, and **bridge** support (many accessories over one
+connection) round out the model. **436 tests, all green** — including a full
+loopback capstone (a Lisp controller pairs → verifies → reads `/accessories` →
+toggles a Lightbulb → receives the pushed event, all over the encrypted channel,
+no multicast required) — and a literate tutorial CI tangles and runs.
 
 ## Use
 
@@ -76,6 +81,19 @@ encrypted channel, no multicast required).
       (hap:hap-subscribe stream 1 9)                            ; subscribe to events
       (hap:read-hap-event stream)                               ; receive a push
       (sb-bsd-sockets:socket-close socket))))
+```
+
+## Tutorial
+
+[`doc/tutorial.org`](doc/tutorial.org) is a literate, tangle-able tour of the API —
+TLV8, building an accessory (helpers and the `define-accessory` DSL), Pair-Setup,
+Pair-Verify, the encrypted session, characteristics, events, and bridges. It
+tangles into a self-checking `doc/tutorial.lisp` that CI runs on every push:
+
+```sh
+emacs --batch --eval "(require 'org)" \
+      --eval '(org-babel-tangle-file "doc/tutorial.org")'
+sbcl --non-interactive --load doc/tutorial.lisp
 ```
 
 ## Environment note

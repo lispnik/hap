@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # cl-hap depends on 0conf, which is not on any registry — check it out as a
+      # sibling and add it to the ASDF source registry below.
+      - name: Check out 0conf (dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: lispnik/0conf
+          path: 0conf
+
+      - name: Install SBCL (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y sbcl
+
+      - name: Install SBCL (macOS)
+        if: runner.os == 'macOS'
+        run: brew install sbcl
+
+      - name: Install ocicl
+        run: |
+          git clone --depth 1 https://github.com/ocicl/ocicl.git "$RUNNER_TEMP/ocicl"
+          ( cd "$RUNNER_TEMP/ocicl" && sbcl --non-interactive --load setup.lisp )
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          # ~/.sbclrc: load the ocicl runtime (ASDF + ocicl.csv resolution) and add
+          # both the cl-hap checkout (cwd) and the sibling 0conf checkout to the
+          # source registry so `(asdf:load-system :hap)` finds everything.
+          cat > "$HOME/.sbclrc" <<RC
+          #-ocicl
+          (when (probe-file #P"~/.local/share/ocicl/ocicl-runtime.lisp")
+            (load #P"~/.local/share/ocicl/ocicl-runtime.lisp"))
+          (asdf:initialize-source-registry
+            (list :source-registry
+                  (list :directory (uiop:getcwd))
+                  (list :tree (merge-pathnames "0conf/" (uiop:getcwd)))
+                  :inherit-configuration))
+          RC
+          test -f "$HOME/.local/share/ocicl/ocicl-runtime.lisp" \
+            || { echo "ocicl-runtime.lisp not found"; ls -la "$HOME/.local/share/ocicl" || true; exit 1; }
+
+      - name: Restore dependencies
+        run: ocicl install
+
+      - name: Run test suite
+        run: sbcl --non-interactive --eval '(asdf:test-system :hap)'
+
+      - name: Install Emacs (Linux, for tutorial tangling)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y emacs-nox
+
+      - name: Tangle and run the literate tutorial
+        if: runner.os == 'Linux'
+        run: |
+          emacs --batch --eval "(require 'org)" \
+                --eval '(org-babel-tangle-file "doc/tutorial.org")'
+          sbcl --non-interactive --load doc/tutorial.lisp
