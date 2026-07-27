@@ -5,3 +5,7 @@
 
 # Tangled from doc/tutorial.org (the .org is the source of truth)
 /doc/tutorial.lisp
+
+# Built example binary + its runtime state
+/hap-lightbulb
+*.state

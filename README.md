@@ -83,6 +83,36 @@ no multicast required) — and a literate tutorial CI tangles and runs.
       (sb-bsd-sockets:socket-close socket))))
 ```
 
+## Add a light bulb to your iPhone
+
+[`examples/lightbulb.lisp`](examples/lightbulb.lisp) is a complete, runnable
+HomeKit Lightbulb accessory. Build it as a standalone binary (a raw `sbcl` can't
+send mDNS multicast on macOS, so it wouldn't be discoverable) and run it:
+
+```sh
+scripts/build-lightbulb.sh
+./hap-lightbulb                     # or:  ./hap-lightbulb "Desk Lamp"
+```
+
+It prints a setup code and advertises itself as `_hap._tcp` on the LAN:
+
+```
+  Lisp Bulb — a Lisp HomeKit light bulb
+  advertised as _hap._tcp  ·  port 59775  ·  id 8F:45:58:55:D4:0A
+
+  On your iPhone:
+    Home  →  +  →  Add Accessory  →  "More options…"
+    pick  "Lisp Bulb",  then enter this setup code:  266-62-381
+```
+
+On the iPhone, **Home → + → Add Accessory → "More options…"**, pick **Lisp Bulb**,
+and enter the code (Home warns it's an "uncertified accessory" — expected). Then
+toggling it in Home / Control Center / Siri flips the Lisp bulb, printing its new
+state in the terminal. The accessory's identity, code, and pairings persist in
+`~/.hap-lightbulb.state`, so you pair once and it stays paired across restarts
+(delete that file to reset). Verify discovery with `dns-sd -B _hap._tcp` or
+`0conf browse _hap._tcp` while it runs.
+
 ## Tutorial
 
 [`doc/tutorial.org`](doc/tutorial.org) is a literate, tangle-able tour of the API —

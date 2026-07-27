@@ -24,6 +24,17 @@
                (:file "transport"))
   :in-order-to ((test-op (test-op "hap/test"))))
 
+(defsystem "hap/lightbulb"
+  :description "Example: a HomeKit Lightbulb accessory you can add to the Home app."
+  :author "Matthew Kennedy"
+  :license "MIT"
+  :depends-on ("hap")
+  :pathname "examples"
+  :components ((:file "lightbulb"))
+  :build-operation "program-op"
+  :build-pathname "../hap-lightbulb"
+  :entry-point "hap-lightbulb:toplevel")
+
 (defsystem "hap/test"
   :description "FiveAM tests for HAP."
   :depends-on ("hap" "fiveam")
