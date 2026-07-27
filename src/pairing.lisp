@@ -150,6 +150,10 @@ LTPK, and respond with the accessory's signed device info (M6)."
               (accessory-paired acc) t))
       (pair-setup-end acc session)
       (maybe-persist acc)
+      ;; Re-advertise now that we're paired: the TXT status flag (sf) must flip
+      ;; from 1 (unpaired) to 0, or HomeKit sees a paired accessory still claiming
+      ;; to be unpaired and shows "No Response".
+      (update-accessory-advertisement acc)
       ;; Accessory's own signed device info, encrypted back.
       (let* ((acc-x (hkdf-key +ps-accessory-sign-salt+ k +ps-accessory-sign-info+))
              (acc-id (s->octets (accessory-id acc)))
@@ -196,7 +200,8 @@ pairing goes the accessory reverts to unpaired."
     (remhash id (accessory-paired-controllers acc))
     (remhash id (accessory-paired-permissions acc))
     (when (zerop (hash-table-count (accessory-paired-controllers acc)))
-      (setf (accessory-paired acc) nil))
+      (setf (accessory-paired acc) nil)
+      (update-accessory-advertisement acc))       ; sf back to 1 (unpaired)
     (maybe-persist acc)
     (tlv8-encode (list (cons +tlv-state+ 2)))))
 
