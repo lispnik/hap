@@ -37,10 +37,15 @@
   (merge-pathnames ".hap-lightbulb.state" (user-homedir-pathname))
   "Where the accessory's identity + pairings are kept, so it survives restarts.")
 
-(defun run (&key (name "Lisp Bulb") setup-code (state-file *state-file*))
+(defun run (&key (name "Lisp Bulb") setup-code (state-file *state-file*) (trace t))
   "Advertise and serve a Lightbulb accessory until Ctrl-C.  The accessory's
 identity, setup code, and pairings persist in STATE-FILE across restarts (so you
-pair once); delete that file to reset to a fresh, unpaired accessory."
+pair once); delete that file to reset to a fresh, unpaired accessory.  When TRACE,
+logs each pairing step so you can see how far a controller (e.g. an iPhone) gets."
+  (when trace
+    (setf hap:*hap-trace*
+          (lambda (fmt &rest args)
+            (format t "~&  [hap] ~?~%" fmt args) (finish-output))))
   (let ((acc (if (probe-file state-file)
                  (hap:load-accessory state-file)                     ; keep identity + pairings
                  (hap:make-hap-accessory :name name :category 5      ; 5 = lightbulb

@@ -41,6 +41,7 @@
    ;; persistence + transport
    #:save-accessory #:load-accessory
    #:serve-accessory #:stop-accessory #:hap-server #:hap-server-port
+   #:*hap-trace*
    #:pair-with-accessory #:verify-with-accessory #:hap-get #:hap-put
    #:hap-subscribe #:read-hap-event
    #:hap-list-pairings #:hap-add-pairing #:hap-remove-pairing

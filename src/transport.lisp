@@ -15,22 +15,43 @@
 
 (defstruct hap-server socket thread port (running t) accessory)
 
+(defvar *hap-trace* nil
+  "When bound to a function of (control-string &rest args), the accessory server
+logs its activity through it — useful for debugging pairing with a real iPhone.")
+
+(defun htrace (fmt &rest args)
+  (when *hap-trace* (apply *hap-trace* fmt args)))
+
+(defun trace-response (label resp)
+  "Log a pairing RESPONSE, noting an error TLV if present.  Returns RESP."
+  (let ((err (ignore-errors (tlv8-get-integer (tlv8-decode resp) +tlv-error+))))
+    (if err
+        (htrace "  ~A -> ERROR ~A" label err)
+        (htrace "  ~A -> ok" label)))
+  resp)
+
 (defun dispatch-pair-setup (session body)
   "Route a /pair-setup request (by its TLV State) through the state machine."
   (let ((state (tlv8-get-integer (tlv8-decode body) +tlv-state+)))
-    (case state
-      (1 (pair-setup-m2 session))
-      (3 (pair-setup-m4 session body))
-      (5 (pair-setup-m6 session body))
-      (t (error-tlv (if state (1+ state) 2) +tlv-error-authentication+)))))
+    (htrace "pair-setup M~A (~D bytes)" state (length body))
+    (trace-response
+     (format nil "pair-setup M~A" (if state (1+ state) '?))
+     (case state
+       (1 (pair-setup-m2 session))
+       (3 (pair-setup-m4 session body))
+       (5 (pair-setup-m6 session body))
+       (t (error-tlv (if state (1+ state) 2) +tlv-error-authentication+))))))
 
 (defun dispatch-pair-verify (verify body)
   "Route a /pair-verify request (by its TLV State) through Pair-Verify."
   (let ((state (tlv8-get-integer (tlv8-decode body) +tlv-state+)))
-    (case state
-      (1 (pair-verify-m2 verify body))
-      (3 (pair-verify-m4 verify body))
-      (t (error-tlv (if state (1+ state) 2) +tlv-error-authentication+)))))
+    (htrace "pair-verify M~A (~D bytes)" state (length body))
+    (trace-response
+     (format nil "pair-verify M~A" (if state (1+ state) '?))
+     (case state
+       (1 (pair-verify-m2 verify body))
+       (3 (pair-verify-m4 verify body))
+       (t (error-tlv (if state (1+ state) 2) +tlv-error-authentication+))))))
 
 (defun handle-connection (acc conn)
   "Serve one persistent connection.  Pair-Setup and Pair-Verify run in plaintext;
@@ -41,11 +62,13 @@ SECURE-STREAM, over which the /accessories and /characteristics traffic flows."
         (verify (make-verify-session :accessory acc))
         (secure nil)
         (connection nil))                  ; a HAP-CONNECTION once the session is up
+    (htrace "connection opened")
     (unwind-protect
          (loop
            (multiple-value-bind (method path body)
                (read-http-request (or secure raw))
-             (when (null method) (return))            ; connection closed
+             (when (null method) (htrace "connection closed") (return))
+             (when secure (htrace "~A ~A (encrypted, ~D bytes)" method path (length body)))
              (cond
                ;; pairing traffic — plaintext, TLV8
                ((string= path "/pair-setup")
@@ -61,12 +84,14 @@ SECURE-STREAM, over which the /accessories and /characteristics traffic flows."
                   (setf secure (make-secure-stream raw (verify-session-session verify))
                         connection (make-hap-connection
                                     :stream secure
-                                    :controller-id (verify-session-controller-id verify)))))
+                                    :controller-id (verify-session-controller-id verify)))
+                  (htrace "  encrypted session established")))
                ;; the accessory model — only over the encrypted session.  The
                ;; reply goes out under the connection lock so a concurrent
                ;; UPDATE-CHARACTERISTIC event push can't interleave with it.
                (secure
                 (let ((reply (handle-accessory-request acc method path body connection)))
+                  (htrace "  ~A -> ~A" path (reply-status reply))
                   (bordeaux-threads:with-lock-held ((hap-connection-lock connection))
                     (write-reply secure reply))))
                (t (write-reply raw (make-reply "470 Connection Authorization Required"
