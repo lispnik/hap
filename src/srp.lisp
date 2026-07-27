@@ -39,6 +39,11 @@
     (dotimes (i length v)
       (setf (aref v i) (ldb (byte 8 (* 8 (- length 1 i))) n)))))
 
+(defun int->min-octets (n)
+  "Minimal-length big-endian octets of N (at least one byte).  Used where SRP
+hashes a value in its natural, *unpadded* form (e.g. H(g) in the M1 proof)."
+  (int->bytes n (max 1 (ceiling (integer-length n) 8))))
+
 (defun bytes->int (bytes)
   (let ((n 0)) (loop for b across bytes do (setf n (logior (ash n 8) b))) n))
 
@@ -111,7 +116,12 @@
 (defun srp-m1 (group username salt a-pub b-pub session-key)
   "Client proof M1 = H(H(N) xor H(g) | H(I) | s | A | B | K)."
   (let* ((hn (srp-hash-bytes group (srp-n-bytes group)))
-         (hg (srp-hash-bytes group (srp-pad group (srp-group-generator group))))
+         ;; H(g) hashes g in its natural, UNPADDED form (a single byte 0x05 for
+         ;; g=5), per the HAP-compatible SRP-6a (fast-srp-hap / pysrp) — even
+         ;; though g IS padded in k.  Padding g here makes M1 mismatch a real
+         ;; iPhone (Pair-Setup M4 -> kTLVError_Authentication), while loopback
+         ;; still agrees because both sides shared the same padding.
+         (hg (srp-hash-bytes group (int->min-octets (srp-group-generator group))))
          (hng (map '(vector (unsigned-byte 8)) #'logxor hn hg))
          (hi (srp-hash-bytes group (s->octets username))))
     (srp-hash-bytes group hng hi salt
