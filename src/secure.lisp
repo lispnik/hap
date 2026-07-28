@@ -15,6 +15,13 @@
 (defparameter +control-read-info+ "Control-Read-Encryption-Key")
 (defparameter +control-write-info+ "Control-Write-Encryption-Key")
 
+(defvar *hap-trace* nil
+  "When bound to a function of (control-string &rest args), the accessory server
+logs its activity through it — useful for debugging pairing with a real iPhone.")
+
+(defun htrace (fmt &rest args)
+  (when *hap-trace* (apply *hap-trace* fmt args)))
+
 ;;; --- session keys + frame codec --------------------------------------------
 
 (defstruct (hap-session (:constructor %make-hap-session))
@@ -55,15 +62,25 @@ AAD, then ciphertext, then the 16-byte tag)."
 (defun session-read-frame (session stream)
   "Read + decrypt one frame from STREAM.  Returns the plaintext, or NIL at EOF or
 on authentication failure."
-  (let ((lb (make-array 2 :element-type '(unsigned-byte 8))))
-    (unless (= 2 (read-sequence lb stream)) (return-from session-read-frame nil))
+  (let* ((lb (make-array 2 :element-type '(unsigned-byte 8)))
+         (got (read-sequence lb stream)))
+    (unless (= got 2)
+      (when (plusp got) (htrace "  !! truncated frame length header (~D of 2 bytes)" got))
+      (return-from session-read-frame nil))               ; got=0 -> clean EOF
     (let* ((len (logior (aref lb 0) (ash (aref lb 1) 8)))
-           (buf (make-array (+ len 16) :element-type '(unsigned-byte 8))))
-      (unless (= (+ len 16) (read-sequence buf stream)) (return-from session-read-frame nil))
-      (prog1 (chacha20-poly1305-decrypt (hap-session-read-key session)
-                                        (session-nonce (hap-session-read-counter session))
-                                        lb (subseq buf 0 len) (subseq buf len))
-        (incf (hap-session-read-counter session))))))
+           (buf (make-array (+ len 16) :element-type '(unsigned-byte 8)))
+           (bgot (read-sequence buf stream)))
+      (unless (= bgot (+ len 16))
+        (htrace "  !! truncated frame body (~D of ~D bytes)" bgot (+ len 16))
+        (return-from session-read-frame nil))
+      (let ((pt (chacha20-poly1305-decrypt (hap-session-read-key session)
+                                           (session-nonce (hap-session-read-counter session))
+                                           lb (subseq buf 0 len) (subseq buf len))))
+        (if pt
+            (incf (hap-session-read-counter session))
+            (htrace "  !! FRAME DECRYPT FAILED (read-counter ~D, len ~D)"
+                    (hap-session-read-counter session) len))
+        pt))))
 
 (defun session-decrypt (session framed)
   "Decrypt every frame in the octet vector FRAMED; return the concatenated
@@ -154,15 +171,21 @@ Pair-Setup and, on success, establish the encrypted session."
          (plain (chacha20-poly1305-decrypt skey (ps-nonce "PV-Msg03") nil
                                            (subseq enc 0 (- (length enc) 16))
                                            (subseq enc (- (length enc) 16)))))
-    (unless plain (return-from pair-verify-m4 (error-tlv 4 +tlv-error-authentication+)))
+    (unless plain
+      (htrace "  !! pair-verify M4: could not decrypt M3 (session-key mismatch)")
+      (return-from pair-verify-m4 (error-tlv 4 +tlv-error-authentication+)))
     (let* ((sub (tlv8-decode plain))
            (ctrl-id (octets->string (tlv8-get sub +tlv-identifier+)))
            (ctrl-sig (tlv8-get sub +tlv-signature+))
            (ctrl-ltpk (gethash ctrl-id (accessory-paired-controllers acc))))
-      (unless ctrl-ltpk (return-from pair-verify-m4 (error-tlv 4 +tlv-error-authentication+)))
+      (unless ctrl-ltpk
+        (htrace "  !! pair-verify M4: no stored key for controller ~A (known: ~{~A~^, ~})"
+                ctrl-id (loop for k being the hash-keys of (accessory-paired-controllers acc) collect k))
+        (return-from pair-verify-m4 (error-tlv 4 +tlv-error-authentication+)))
       (let ((ctrl-info (cat (verify-session-controller-pub vs) (s->octets ctrl-id)
                             (x25519-keypair-public-bytes (verify-session-ephemeral vs)))))
         (unless (ed25519-verify ctrl-ltpk ctrl-info ctrl-sig)
+          (htrace "  !! pair-verify M4: controller signature invalid for ~A" ctrl-id)
           (return-from pair-verify-m4 (error-tlv 4 +tlv-error-authentication+)))
         (setf (verify-session-controller-id vs) ctrl-id
               (verify-session-session vs)

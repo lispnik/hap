@@ -100,18 +100,43 @@ present to the user for pairing."
         (cons "ci" (princ-to-string (accessory-category acc)))
         (cons "sh" (setup-hash (accessory-setup-id acc) (accessory-id acc)))))
 
-(defun advertise-accessory (acc &key (probe nil))
-  "Start advertising ACC as `_hap._tcp` on the LAN via 0conf.  (Live visibility in
-the Home app needs working multicast — blocked by the macOS entitlement here, but
-the record set is correct and works on an entitled/Linux host.)"
-  (let ((responder (0conf:start-responder (0conf:make-responder)))
-        (info (0conf:make-service-info :type "_hap._tcp.local"
-                                       :name (accessory-name acc)
-                                       :port (accessory-port acc)
-                                       :txt (accessory-txt acc))))
+(defun primary-ipv4 ()
+  "The IPv4 address (octets) of a usable, routable interface, or NIL."
+  (loop for nif in (0conf:list-interfaces)
+        for v4 = (0conf:net-interface-ipv4 nif)
+        when v4 return v4))
+
+(defun accessory-hostname (acc)
+  "A unique .local host name for ACC, derived from its pairing id."
+  (format nil "hap-~A.local" (substitute #\- #\: (accessory-id acc))))
+
+(defun advertise-accessory (acc &key (probe t))
+  "Start advertising ACC as `_hap._tcp` on the LAN via 0conf.
+
+We advertise the accessory under its OWN host name with ONLY its routable LAN IPv4
+address, rather than leaning on the machine's system host record.  That record
+includes loopback / link-local addresses (127.0.0.1, ::1, fe80::…), and a
+controller (an iPhone) that resolves the accessory to one of those can't reach it
+and shows \"No Response\" — even though pairing succeeded.  (Live visibility still
+needs working multicast; on a bare unsigned sbcl the macOS entitlement blocks it,
+but a built binary works.)"
+  (let* ((responder (0conf:start-responder (0conf:make-responder)))
+         (addr (primary-ipv4))
+         (info (if addr
+                   (0conf:make-service-info :type "_hap._tcp.local"
+                                            :name (accessory-name acc)
+                                            :host (accessory-hostname acc)
+                                            :port (accessory-port acc)
+                                            :addresses (list addr)
+                                            :txt (accessory-txt acc))
+                   ;; no routable interface found — fall back to the system host
+                   (0conf:make-service-info :type "_hap._tcp.local"
+                                            :name (accessory-name acc)
+                                            :port (accessory-port acc)
+                                            :txt (accessory-txt acc)))))
     (setf (accessory-responder acc) responder
           (accessory-service-info acc) info)
-    (0conf:register-service responder info :probe probe)
+    (0conf:register-service responder info :probe (and addr probe))
     acc))
 
 (defun update-accessory-advertisement (acc)

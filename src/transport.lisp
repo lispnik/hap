@@ -15,13 +15,6 @@
 
 (defstruct hap-server socket thread port (running t) accessory)
 
-(defvar *hap-trace* nil
-  "When bound to a function of (control-string &rest args), the accessory server
-logs its activity through it — useful for debugging pairing with a real iPhone.")
-
-(defun htrace (fmt &rest args)
-  (when *hap-trace* (apply *hap-trace* fmt args)))
-
 (defun trace-response (label resp)
   "Log a pairing RESPONSE, noting an error TLV if present.  Returns RESP."
   (let ((err (ignore-errors (tlv8-get-integer (tlv8-decode resp) +tlv-error+))))
@@ -90,8 +83,12 @@ SECURE-STREAM, over which the /accessories and /characteristics traffic flows."
                ;; reply goes out under the connection lock so a concurrent
                ;; UPDATE-CHARACTERISTIC event push can't interleave with it.
                (secure
+                (when (plusp (length body))
+                  (htrace "  req  body: ~A" (ignore-errors (octets->string body))))
                 (let ((reply (handle-accessory-request acc method path body connection)))
-                  (htrace "  ~A -> ~A" path (reply-status reply))
+                  (htrace "  ~A -> ~A~@[  resp body: ~A~]" path (reply-status reply)
+                          (and (reply-body reply)
+                               (ignore-errors (octets->string (reply-body reply)))))
                   (bordeaux-threads:with-lock-held ((hap-connection-lock connection))
                     (write-reply secure reply))))
                (t (write-reply raw (make-reply "470 Connection Authorization Required"
@@ -115,16 +112,31 @@ join in STOP-ACCESSORY (macOS/BSD wake it, which is why this only bites on Linux
                   ;; back to blocking so the per-connection reads work everywhere
                   (setf (sb-bsd-sockets:non-blocking-mode conn) nil)
                   (bordeaux-threads:make-thread
-                   (lambda () (ignore-errors (handle-connection (hap-server-accessory server) conn)))
+                   (lambda ()
+                     (handler-case (handle-connection (hap-server-accessory server) conn)
+                       (error (e) (htrace "  !! connection handler error: ~A" e))))
                    :name "hap-conn"))
                  (t (sleep 0.02)))))))          ; nothing pending -> yield briefly
 
+(defparameter +ipv6-v6only+ #+darwin 27 #+linux 26 #-(or darwin linux) 27
+  "IPV6_V6ONLY socket option number (macOS 27, Linux 26).")
+
 (defun serve-accessory (acc)
-  "Start a TCP server for ACC on its port (0 = ephemeral).  Returns a HAP-SERVER;
-its PORT slot is the actually-bound port.  Stop it with STOP-ACCESSORY."
-  (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+  "Start a dual-stack (IPv6 + IPv4) TCP server for ACC on its port (0 = ephemeral).
+Returns a HAP-SERVER; its PORT slot is the actually-bound port.  Stop it with
+STOP-ACCESSORY.
+
+Dual-stack matters for HomeKit: the host's Bonjour record advertises both IPv4 and
+IPv6 addresses, and iOS may open its long-lived monitoring connection over IPv6 —
+an IPv4-only accessory pairs but then shows \"No Response\"."
+  (let ((socket (make-instance 'sb-bsd-sockets:inet6-socket :type :stream :protocol :tcp)))
     (setf (sb-bsd-sockets:sockopt-reuse-address socket) t)
-    (sb-bsd-sockets:socket-bind socket #(0 0 0 0) (accessory-port acc))
+    ;; accept IPv4-mapped connections too (IPV6_V6ONLY=0) so IPv4 clients — and the
+    ;; loopback tests / CI — still connect to this IPv6 socket.
+    (ignore-errors
+      (0conf::set-sockopt-int (sb-bsd-sockets:socket-file-descriptor socket)
+                              0conf::+ipproto-ipv6+ +ipv6-v6only+ 0))
+    (sb-bsd-sockets:socket-bind socket #(0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0) (accessory-port acc))
     (sb-bsd-sockets:socket-listen socket 5)
     (let ((server (make-hap-server
                    :socket socket :accessory acc
