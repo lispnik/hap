@@ -58,8 +58,16 @@ jobs:
           test -f "$HOME/.local/share/ocicl/ocicl-runtime.lisp" \
             || { echo "ocicl-runtime.lisp not found"; ls -la "$HOME/.local/share/ocicl" || true; exit 1; }
 
+      # ghcr.io sometimes resets connections mid-download on the Linux runner;
+      # retry, since packages that already downloaded are kept between attempts.
       - name: Restore dependencies
-        run: ocicl install
+        run: |
+          for i in 1 2 3 4 5; do
+            ocicl install && exit 0
+            echo "ocicl install failed (attempt $i); retrying in $((i * 10))s"
+            sleep $((i * 10))
+          done
+          exit 1
 
       - name: Run test suite
         run: sbcl --non-interactive --eval '(asdf:test-system :hap)'
