@@ -67,7 +67,7 @@ admin check on /pairings)."
    :iid iid :type +svc-accessory-information+
    :characteristics
    (list (make-hap-char :iid (+ iid 1) :type +char-identify+ :perms '("pw") :format "bool")
-         (make-hap-char :iid (+ iid 2) :type +char-manufacturer+ :value "cl-hap" :perms '("pr") :format "string")
+         (make-hap-char :iid (+ iid 2) :type +char-manufacturer+ :value "hap" :perms '("pr") :format "string")
          (make-hap-char :iid (+ iid 3) :type +char-model+ :value (accessory-model acc) :perms '("pr") :format "string")
          (make-hap-char :iid (+ iid 4) :type +char-name+ :value (accessory-name acc) :perms '("pr") :format "string")
          (make-hap-char :iid (+ iid 5) :type +char-serial+ :value (accessory-id acc) :perms '("pr") :format "string")

@@ -1,4 +1,4 @@
-# cl-hap
+# hap
 
 [![CI](https://github.com/lispnik/hap/actions/workflows/ci.yml/badge.svg)](https://github.com/lispnik/hap/actions/workflows/ci.yml)
 

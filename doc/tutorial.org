@@ -1,7 +1,7 @@
-#+TITLE: cl-hap — a literate tour
+#+TITLE: hap — a literate tour
 #+PROPERTY: header-args:lisp :tangle tutorial.lisp :results silent
 
-This is a tangle-able walkthrough of ~cl-hap~, the pure Common Lisp implementation
+This is a tangle-able walkthrough of ~hap~, the pure Common Lisp implementation
 of Apple's HomeKit Accessory Protocol. Every source block below tangles into
 =doc/tutorial.lisp=; loading that file runs the whole tour and *asserts* its own
 results, so CI can prove the prose stays true.
@@ -204,7 +204,7 @@ connection — the pattern for a hub speaking to many devices.
 * Done
 
 #+begin_src lisp
-(format t "~&cl-hap tutorial: all checks passed.~%")
+(format t "~&hap tutorial: all checks passed.~%")
 #+end_src
 
 If you loaded this file and reached this line without an assertion error, the

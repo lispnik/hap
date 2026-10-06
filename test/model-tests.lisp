@@ -64,7 +64,7 @@ a subsequent GET reports the new value."
                    acc (hap::s->octets
                         "{\"characteristics\":[{\"aid\":1,\"iid\":4,\"value\":\"hacked\"}]}"))))
       (is (not (string= "204 No Content" (hap::reply-status reply))))
-      (is (string= "cl-hap" (hap::hap-char-value model))))))  ; unchanged
+      (is (string= "hap" (hap::hap-char-value model))))))  ; unchanged
 
 (test ensure-adds-protocol-information-service
   "ensure-accessory-information provides both mandatory services: Accessory

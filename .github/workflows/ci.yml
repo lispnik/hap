@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # cl-hap depends on 0conf, which is not on any registry — check it out as a
+      # hap depends on 0conf, which is not on any registry — check it out as a
       # sibling and add it to the ASDF source registry below.
       - name: Check out 0conf (dependency)
         uses: actions/checkout@v4
@@ -43,7 +43,7 @@ jobs:
           ( cd "$RUNNER_TEMP/ocicl" && sbcl --non-interactive --load setup.lisp )
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           # ~/.sbclrc: load the ocicl runtime (ASDF + ocicl.csv resolution) and add
-          # both the cl-hap checkout (cwd) and the sibling 0conf checkout to the
+          # both the hap checkout (cwd) and the sibling 0conf checkout to the
           # source registry so `(asdf:load-system :hap)` finds everything.
           cat > "$HOME/.sbclrc" <<RC
           #-ocicl

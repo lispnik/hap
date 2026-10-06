@@ -60,7 +60,7 @@ present to the user for pairing."
 (defstruct accessory
   (id (random-device-id))          ; pairing id "AA:BB:CC:DD:EE:FF"
   (name "Lisp Accessory")
-  (model "cl-hap")
+  (model "hap")
   (category 2)                     ; HAP accessory category (2 = bridge; 5 = lightbulb …)
   (config-number 1)               ; c# — bump when the accessory database changes
   (state-number 1)                ; s#

@@ -24,13 +24,13 @@
                     (hap::setup-hash "ZZZZ" "AA:BB:CC:DD:EE:FF")))))
 
 (test accessory-txt-has-required-hap-keys
-  (let* ((acc (make-hap-accessory :name "Test Light" :model "cl-hap" :category 5))
+  (let* ((acc (make-hap-accessory :name "Test Light" :model "hap" :category 5))
          (txt (accessory-txt acc)))
     (flet ((v (k) (cdr (assoc k txt :test #'string=))))
       (is (string= "1.1" (v "pv")))
       (is (string= "1" (v "sf")))               ; unpaired -> discoverable
       (is (string= "5" (v "ci")))               ; category
-      (is (string= "cl-hap" (v "md")))
+      (is (string= "hap" (v "md")))
       (is (string= (accessory-id acc) (v "id")))
       (is (string= "1" (v "c#")))
       (is (string= "1" (v "s#")))
@@ -62,7 +62,7 @@ responder lifecycle.)  Skips if the sandbox forbids binding 5353."
   "M6: a controller parses a discovered accessory's `_hap._tcp` TXT record into
 usable metadata (this is the read side of discovery; live browsing needs the
 multicast entitlement)."
-  (let* ((acc (make-hap-accessory :name "Discoverable" :model "cl-hap" :category 5))
+  (let* ((acc (make-hap-accessory :name "Discoverable" :model "hap" :category 5))
          (si (0conf:make-service-info :type "_hap._tcp.local" :name "Discoverable"
                                       :host "disc.local" :port 51999
                                       :txt (accessory-txt acc)))
@@ -70,7 +70,7 @@ multicast entitlement)."
     (is (string= "Discoverable" (getf info :name)))
     (is (= 51999 (getf info :port)))
     (is (string= (accessory-id acc) (getf info :id)))
-    (is (string= "cl-hap" (getf info :model)))
+    (is (string= "hap" (getf info :model)))
     (is (eql 5 (getf info :category)))
     (is (null (getf info :paired)))            ; sf bit0=1 (unpaired) -> :paired NIL
     (is (string= "1.1" (getf info :protocol-version)))
